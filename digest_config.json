@@ -1,0 +1,10 @@
+{
+  "ffmpeg": "F:\\SCL\\TOOLS\\ffmpeg\\bin\\ffmpeg.exe",
+  "whisper_python": "F:\\SCL\\TOOLS\\whisper-env\\Scripts\\python.exe",
+  "model": "small",
+  "cpu_threads": 4,
+  "clip_seconds": 20,
+  "singer_name": "内田もあ",
+  "tiktok_account": "@moa_pi",
+  "work_root": "F:\\SCL\\TikTok"
+}

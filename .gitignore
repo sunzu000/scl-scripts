@@ -1,0 +1,19 @@
+﻿# Backup / temporary files
+Backup/
+__pycache__/
+*.pyc
+
+# Runtime logs and locks
+*.log
+*.lock
+
+# Temporary files
+*.tmp
+*.part
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+
+# Old digest backups
+digest_backup_*/
