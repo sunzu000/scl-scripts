@@ -1,10 +1,148 @@
-{
-  "ffmpeg": "F:\\SCL\\TOOLS\\ffmpeg\\bin\\ffmpeg.exe",
-  "whisper_python": "F:\\SCL\\TOOLS\\whisper-env\\Scripts\\python.exe",
-  "model": "small",
-  "cpu_threads": 4,
-  "clip_seconds": 20,
-  "singer_name": "内田もあ",
-  "tiktok_account": "@moa_pi",
-  "work_root": "F:\\SCL\\TikTok"
+﻿{
+    "ffmpeg":  "F:\\SCL\\TOOLS\\ffmpeg\\bin\\ffmpeg.exe",
+    "whisper_python":  "F:\\SCL\\TOOLS\\whisper-env\\Scripts\\python.exe",
+    "model":  "small",
+    "cpu_threads":  4,
+    "clip_seconds":  20,
+    "singer_name":  "内田もあ",
+    "tiktok_account":  "@moa_pi",
+    "work_root":  "F:\\SCL\\TikTok",
+    "songs":  [
+                  {
+                      "title":  "ムーンリバー",
+                      "aliases":  [
+                                      "ムーンリバー",
+                                      "ムーニバー"
+                                  ],
+                      "opening_lyrics":  [
+                                             "Moon River wider than a mile",
+                                             "wider than a mile",
+                                             "Why that\u0027s an amide"
+                                         ]
+                  },
+                  {
+                      "title":  "あなたが好きな魚の名前",
+                      "aliases":  [
+                                      "あなたが好きな魚の名前"
+                                  ],
+                      "opening_lyrics":  [
+                                             "いつもそばで笑って"
+                                         ]
+                  },
+                  {
+                      "title":  "足跡",
+                      "aliases":  [
+                                      "足跡",
+                                      "アシアト"
+                                  ],
+                      "opening_lyrics":  [
+                                             "あなたがいないこの道も"
+                                         ]
+                  },
+                  {
+                      "title":  "時代",
+                      "aliases":  [
+                                      "時代",
+                                      "ジダイ"
+                                  ],
+                      "opening_lyrics":  [
+                                             "今はこんなに悲しくて"
+                                         ]
+                  },
+                  {
+                      "title":  "とぅーゆー",
+                      "aliases":  [
+                                      "とぅーゆー",
+                                      "という",
+                                      "2E"
+                                  ],
+                      "opening_lyrics":  [
+                                             "君がいることが僕の当たり前"
+                                         ]
+                  },
+                  {
+                      "title":  "亜麻色の髪の乙女",
+                      "aliases":  [
+                                      "亜麻色の髪の乙女",
+                                      "甘い色の髪"
+                                  ],
+                      "opening_lyrics":  [
+                                             "亜麻色の長い髪を",
+                                             "甘いものの"
+                                         ],
+                      "confirm_lyrics":  [
+                                             "長い髪を",
+                                             "風が優しく包む"
+                                         ],
+                      "threshold":  0.82
+                  },
+                  {
+                      "title":  "心得",
+                      "aliases":  [
+                                      "心得",
+                                      "心へ"
+                                  ],
+                      "opening_lyrics":  [
+                                             "時に"
+                                         ],
+                      "confirm_lyrics":  [
+                                             "空のように",
+                                             "海のように"
+                                         ]
+                  },
+                  {
+                      "title":  "fragile",
+                      "aliases":  [
+                                      "fragile",
+                                      "フラジール",
+                                      "フラジエル"
+                                  ],
+                      "opening_lyrics":  [
+                                             "いつもそう単純で"
+                                         ]
+                  },
+                  {
+                      "title":  "明日への手紙",
+                      "aliases":  [
+                                      "明日への手紙",
+                                      "安静の手紙",
+                                      "汗の手紙"
+                                  ],
+                      "opening_lyrics":  [
+                                             "元気でいますか",
+                                             "いつか夢は叶いますか"
+                                         ]
+                  },
+                  {
+                      "title":  "恋愛サーキュレーション",
+                      "aliases":  [
+                                      "恋愛サーキュレーション"
+                                  ],
+                      "opening_lyrics":  [
+                                             "でもそんなんじゃダメ",
+                                             "でもそんなんちゃダメ"
+                                         ]
+                  },
+                  {
+                      "title":  "カブトムシ",
+                      "aliases":  [
+                                      "カブトムシ",
+                                      "かぶと虫"
+                                  ],
+                      "opening_lyrics":  [
+                                             "悩んでる体が熱くて",
+                                             "悩んでる体がつくって"
+                                         ]
+                  },
+                  {
+                      "title":  "チャイナブルー",
+                      "aliases":  [
+                                      "チャイナブルー",
+                                      "チャイナブル"
+                                  ],
+                      "opening_lyrics":  [
+                                             "まるで海のようね"
+                                         ]
+                  }
+              ]
 }

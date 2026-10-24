@@ -9,11 +9,62 @@ import os
 import signal
 import threading
 import re
+import socket
+import urllib.request
+import urllib.error
 from digest_pipeline import FileLock, save_json
+
+
+def notify_ntfy(args, title, message, priority="default"):
+    """ntfyへ通知する。通知失敗は録画処理を止めない。"""
+    topic = getattr(args, "ntfy_topic", "")
+    if not topic:
+        return
+    machine = socket.gethostname()
+    body = f"[{machine}] {message}".encode("utf-8")
+    request = urllib.request.Request(
+        f"https://ntfy.sh/{topic}",
+        data=body,
+        method="POST",
+        headers={
+            "Title": "TikTok LIVE Monitor",
+            "Priority": priority,
+            "Content-Type": "text/plain; charset=utf-8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+        logging.info("ntfy通知送信: %s / %s", title, message)
+    except (urllib.error.URLError, TimeoutError, OSError, UnicodeError) as exc:
+        logging.warning("ntfy通知失敗（録画処理は継続）: %s", exc)
+
+
+
+def log_live_diagnostic(base, url, reason):
+    """LIVE誤判定調査用。失敗しても監視・録画には影響させない。"""
+    try:
+        path = Path(__file__).with_name("moa_pi_live_diagnostic.log")
+        command = base + ["--verbose", "--dump-single-json", "--skip-download", url]
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=45
+        )
+        with path.open("a", encoding="utf-8") as log:
+            log.write("\n===== " + time.strftime("%Y-%m-%d %H:%M:%S") + " =====\n")
+            log.write("reason=" + str(reason) + "\n")
+            log.write("returncode=" + str(result.returncode) + "\n")
+            if result.stdout:
+                log.write("--- stdout ---\n" + result.stdout[-12000:] + "\n")
+            if result.stderr:
+                log.write("--- stderr ---\n" + result.stderr[-12000:] + "\n")
+    except Exception as exc:
+        logging.warning("LIVE診断ログ取得失敗（監視は継続）: %s", exc)
 
 
 def wait_for_live(base, url, interval, minutes):
     deadline = float("inf") if minutes is None else time.monotonic() + minutes * 60
+    last_diagnostic = 0.0
     while time.monotonic() < deadline:
         cycle = time.monotonic()
         try:
@@ -27,8 +78,16 @@ def wait_for_live(base, url, interval, minutes):
                 logging.info("ライブ未開始")
             elif "not currently live" in result.stderr.lower():
                 logging.info("ライブ未開始")
+                now = time.monotonic()
+                if now - last_diagnostic >= 600:
+                    log_live_diagnostic(base, url, "yt-dlp returned not currently live")
+                    last_diagnostic = now
             else:
                 logging.warning("配信状態を取得できません: %s", result.stderr.strip()[-1500:])
+                now = time.monotonic()
+                if now - last_diagnostic >= 600:
+                    log_live_diagnostic(base, url, "live status check failed")
+                    last_diagnostic = now
         except (subprocess.TimeoutExpired, ValueError) as exc:
             logging.warning("配信確認失敗: %s", exc)
         time.sleep(max(0, min(interval - (time.monotonic() - cycle), deadline - time.monotonic())))
@@ -142,7 +201,7 @@ def recover_part_files(args, out, account):
     """異常終了で残った .mp4.part を安全にMP4へ復旧する。
 
     復旧中は .recovering.mp4 に出力し、検証成功後だけ正式な .mp4 に置換する。
-    元の .mp4.part は正式MP4の検証成功後にだけ削除する。失敗時は必ず残す。
+    元の .mp4.part は成功・失敗にかかわらず保全のため残す。
     """
     recovered = 0
     failed = 0
@@ -153,11 +212,7 @@ def recover_part_files(args, out, account):
         if target.exists():
             if validate_media(args.ffmpeg, target):
                 logging.info("復旧済みMP4を確認: %s", target.name)
-                try:
-                    part.unlink()
-                    logging.info("元の.partを削除: %s", part.name)
-                except OSError as exc:
-                    logging.warning("復旧済みですが元の.partを削除できません: %s", exc)
+                logging.info("元の.partは保全のため保持します: %s", part.name)
                 recovered += 1
                 continue
             logging.warning("同名MP4が存在しますが検証に失敗したため、.partは保持します: %s", target.name)
@@ -191,8 +246,7 @@ def recover_part_files(args, out, account):
                 logging.error("正式MP4への確定後検証に失敗。.partは保持します: %s", part.name)
                 failed += 1
                 continue
-            part.unlink()
-            logging.info(".part自動復旧成功: %s -> %s", part.name, target.name)
+            logging.info(".part自動復旧成功: %s -> %s（元.partは保持）", part.name, target.name)
             recovered += 1
         except (OSError, subprocess.SubprocessError) as exc:
             logging.exception(".part復旧中にエラー。元ファイルは保持します: %s / %s", part.name, exc)
@@ -257,6 +311,7 @@ def finish_session(args, account, stamp, out, prefixes=None):
 def capture_session(base, url, args, account, stamp, out, bounded):
     last_code=0; attempt=0; part_no=next_part_number(out,account)
     save_recording_state(out,account,stamp,"recording")
+    notify_ntfy(args, "TikTok LIVE", f"@{account} 録画開始", "high")
     try:
         while True:
             prefix=f"{account}_{stamp}_part{part_no:04d}"
@@ -264,17 +319,21 @@ def capture_session(base, url, args, account, stamp, out, bounded):
             code=download_live(base,url,args,out,prefix)
             save_recording_state(out,account,stamp,"reconnect_wait")
             if code==130: return 130
+            if code != 0:
+                notify_ntfy(args, "recording error", f"録画プロセス異常終了 code={code}。再接続を試みます", "urgent")
             last_code=code
             if bounded and attempt>=args.max_restarts:
                 logging.warning("再録画上限に達しました。配信途中の可能性があるため後処理は保留します")
                 return code or 1
             attempt+=1; part_no+=1
             logging.info("最大%d分の再開待ち。再開した動画は同じ配信として扱います",args.reconnect_minutes)
-            remaining=args.reconnect_minutes*60-args.interval
-            time.sleep(min(args.interval,args.reconnect_minutes*60))
-            if remaining<=0 or not wait_for_live(base,url,args.interval,remaining/60):
+            reconnect_interval=min(5,args.interval)
+            remaining=args.reconnect_minutes*60-reconnect_interval
+            time.sleep(min(reconnect_interval,args.reconnect_minutes*60))
+            if remaining<=0 or not wait_for_live(base,url,reconnect_interval,remaining/60):
                 logging.info("再開待ち時間が経過。配信終了として後処理を開始します")
                 finish_session(args,account,stamp,out)
+                notify_ntfy(args, "TikTok LIVE", f"@{account} 配信終了・録画完了", "default")
                 return last_code
             save_recording_state(out,account,stamp,"recording")
     except KeyboardInterrupt:
@@ -282,10 +341,27 @@ def capture_session(base, url, args, account, stamp, out, bounded):
         save_recording_state(out,account,stamp,"manual_stop")
         return 130
 
+def manual_session(base, url, args, account, out):
+    """Manual standby mode: check every 5 seconds, then record using the normal capture path."""
+    manual_interval = 5
+    logging.info("Manual mode started. Waiting for LIVE every %d seconds.", manual_interval)
+    if not wait_for_live(base, url, manual_interval, None):
+        return 0
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    live_out = session_folder(out, stamp)
+    live_out.mkdir(parents=True, exist_ok=True)
+    recover_part_files(args, live_out, account)
+    existing = recording_files(live_out, account)
+    if existing:
+        logging.info("Existing recordings found for today: %d", len(existing))
+    notify_ntfy(args, "TikTok LIVE", f"@{account} manual LIVE detected", "high")
+    return capture_session(base, url, args, account, stamp, live_out, False)
+
 def record_session(base, url, args, account, stamp, out):
     logging.info("開始待ち: %s / 確認間隔%d秒 / 最大待機%d分", url, args.interval, args.wait_minutes)
     if not wait_for_live(base, url, args.interval, args.wait_minutes):
         return 0
+    notify_ntfy(args, "TikTok LIVE", f"@{account} LIVE検知", "high")
     live_out = session_folder(out, stamp)
     live_out.mkdir(parents=True, exist_ok=True)
     return capture_session(base, url, args, account, stamp, live_out, True)
@@ -304,8 +380,14 @@ def continuous_session(base, url, args, account, out):
                 existing = recording_files(live_out, account)
                 if existing:
                     logging.info("同日既存録画を%d本検出。PC再起動前の素材も同じLIVEフォルダで引き継ぎます", len(existing))
-                if capture_session(base, url, args, account, stamp, live_out, False) == 130:
-                    return 130
+                try:
+                    if capture_session(base, url, args, account, stamp, live_out, False) == 130:
+                        return 130
+                except Exception as exc:
+                    logging.exception("録画処理で想定外エラー。常時監視を継続します: %s", exc)
+                    notify_ntfy(args, "TikTok LIVE 録画異常",
+                                f"@{account} 録画処理で想定外エラー。監視を継続します", "urgent")
+                    time.sleep(args.interval)
     except KeyboardInterrupt:
         logging.info("常時監視を停止しました")
     return 130
@@ -322,8 +404,10 @@ def main():
     parser.add_argument("--max-restarts", type=int, default=10)
     parser.add_argument("--stall-seconds", type=int, default=180, help="録画データの更新が止まった場合の再監視までの秒数（既定180）")
     parser.add_argument("--continuous", action="store_true", help="起動中は時間制限なしで次のライブを監視")
+    parser.add_argument("--manual", action="store_true", help="Manual standby: check LIVE every 5 seconds and record when detected")
     parser.add_argument("--digest-config", default=str(Path(__file__).with_name("digest_config.json")))
     parser.add_argument("--no-digest", action="store_true", help="後処理を無効にして録画のみ実施")
+    parser.add_argument("--ntfy-topic", default="live-1217", help="ntfy通知トピック。空文字で通知無効")
     args = parser.parse_args()
     if args.interval < 10 or args.wait_minutes < 1:
         parser.error("intervalは10秒以上、wait-minutesは1分以上で指定してください")
@@ -352,6 +436,10 @@ def main():
             parser.error("録画と後処理のFFmpegパスを一致させてください")
     try:
         with FileLock(Path(__file__).with_name(account + ".recorder.lock")):
+            if args.continuous and args.manual:
+                parser.error("--continuous and --manual cannot be used together")
+            if args.manual:
+                return manual_session(base, url, args, account, out)
             if args.continuous:
                 return continuous_session(base, url, args, account, out)
             return record_session(base, url, args, account, stamp, out)
