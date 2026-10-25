@@ -1,4 +1,4 @@
-﻿"""Local TikTok post-processing. No API key or cloud transcription required."""
+"""Local TikTok post-processing. No API key or cloud transcription required."""
 import argparse
 import csv
 import difflib
@@ -540,6 +540,89 @@ def cleanup_source_recordings(inputs, merged):
             removed.append(str(p))
     return removed
 
+
+def supabase_sync_live(folder, songs, date, video=None, digest=None):
+    """Upsert one LIVE and its playlist to Supabase using user environment variables."""
+    import requests
+
+    url = os.getenv('SUPABASE_URL')
+    key = os.getenv('SUPABASE_SECRET_KEY')
+    if not url or not key:
+        logging.warning('Supabase sync skipped: environment variables are not configured')
+        return False
+
+    raw_date = str(date or '').replace('-', '')
+    if not re.fullmatch(r'\d{8}', raw_date):
+        logging.warning('Supabase sync skipped: invalid date %r', date)
+        return False
+    live_date = f'{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}'
+
+    headers = {
+        'apikey': key,
+        'Authorization': 'Bearer ' + key,
+        'Content-Type': 'application/json',
+    }
+
+    def request(method, path, **kwargs):
+        response = requests.request(method, url + path, headers=headers, timeout=60, **kwargs)
+        if not response.ok:
+            raise RuntimeError(f'Supabase HTTP {response.status_code}: {response.text[:500]}')
+        return response
+
+    folder = Path(folder).resolve()
+    transcript_path = folder / 'transcript.json'
+    playlist_path = folder / 'playlist.json'
+
+    # Upsert LIVE header by live_date and return live_id.
+    payload = {
+        'live_date': live_date,
+        'song_count': len(songs),
+        'source_folder': str(folder),
+        'transcript_path': str(transcript_path) if transcript_path.exists() else None,
+        'playlist_path': str(playlist_path) if playlist_path.exists() else None,
+        'digest_path': str(digest) if digest else None,
+    }
+    h = {**headers, 'Prefer': 'resolution=merge-duplicates,return=representation'}
+    r = requests.post(
+        url + '/rest/v1/tiktok_lives?on_conflict=live_date',
+        headers=h, json=payload, timeout=60)
+    if not r.ok:
+        raise RuntimeError(f'Supabase LIVE upsert HTTP {r.status_code}: {r.text[:500]}')
+    live_id = r.json()[0]['live_id']
+
+    # Load original-song master. Only an exact, unique title match is linked.
+    master = request('GET', '/rest/v1/songs?select=song_id,song_title&limit=1000').json()
+    title_to_ids = {}
+    for item in master:
+        title_to_ids.setdefault(item['song_title'], []).append(item['song_id'])
+
+    detail = []
+    for song_no, song in enumerate(songs, 1):
+        title = str(song.get('title') or '').strip() or '曲名不明'
+        ids = title_to_ids.get(title, [])
+        song_id = ids[0] if len(ids) == 1 else None
+        detail.append({
+            'live_id': live_id,
+            'song_no': song_no,
+            'title': title,
+            'start_seconds': float(song['start']) if song.get('start') is not None else None,
+            'song_id': song_id,
+            'needs_review': title in {'不明', '曲名不明', '楽曲名不明', '未判別', 'unknown', '?', '？'},
+        })
+
+    if detail:
+        r = requests.post(
+            url + '/rest/v1/tiktok_live_songs?on_conflict=live_id,song_no',
+            headers={**headers, 'Prefer': 'resolution=merge-duplicates,return=minimal'},
+            json=detail, timeout=60)
+        if not r.ok:
+            raise RuntimeError(f'Supabase song upsert HTTP {r.status_code}: {r.text[:500]}')
+
+    logging.info('Supabase sync completed: %s / %d songs / live_id=%s',
+                 live_date, len(detail), live_id)
+    return True
+
+
 def process(inputs, folder, config, transcript=None, playlist=None, date='', render_only=False):
     folder = Path(folder).resolve()
     folder.mkdir(parents=True, exist_ok=True)
@@ -579,6 +662,12 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                 # Do not overwrite manual corrections in playlist.json.
                 write_playlist(folder, songs, merged, warnings)
             final = render(merged.resolve(), folder, songs, config, date or folder.name)
+            try:
+                supabase_sync_live(folder, songs, date or folder.name[:8], merged, final)
+            except Exception as sync_exc:
+                # A cloud/database problem must not destroy a successfully created digest.
+                warnings.append('Supabase sync failed: ' + str(sync_exc))
+                logging.exception('Supabase sync failed; digest is retained')
             save_json(state_path, {'status': 'completed_candidates', 'output': str(final),
                                   'songs': len(songs), 'warnings': warnings,
                                   'review_required': True})
