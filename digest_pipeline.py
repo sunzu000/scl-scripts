@@ -574,9 +574,23 @@ def supabase_sync_live(folder, songs, date, video=None, digest=None):
     playlist_path = folder / 'playlist.json'
 
     # Upsert LIVE header by live_date and return live_id.
+    # Reuse source_duration already recorded by render().  This avoids adding a
+    # new ffprobe/PATH dependency to the automatic recording/post-process path.
+    duration_minutes = None
+    render_result_path = folder / 'render_result.json'
+    if render_result_path.is_file():
+        try:
+            render_result = json.loads(render_result_path.read_text(encoding='utf-8-sig'))
+            source_duration = float(render_result.get('source_duration') or 0)
+            if math.isfinite(source_duration) and source_duration > 0:
+                duration_minutes = round(source_duration / 60.0, 2)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logging.warning('Could not read LIVE duration from render_result.json: %s', exc)
+
     payload = {
         'live_date': live_date,
         'song_count': len(songs),
+        'duration_minutes': duration_minutes,
         'source_folder': str(folder),
         'transcript_path': str(transcript_path) if transcript_path.exists() else None,
         'playlist_path': str(playlist_path) if playlist_path.exists() else None,
@@ -661,9 +675,15 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                 warnings = ['Manual re-render; see source_parts.json for original input warnings.']
                 # Do not overwrite manual corrections in playlist.json.
                 write_playlist(folder, songs, merged, warnings)
-            final = render(merged.resolve(), folder, songs, config, date or folder.name)
+            render_date = date or folder.name[:8]
+            existing_digest = folder / f'{render_date}_digest.mp4'
+            if existing_digest.is_file() and not render_only:
+                final = existing_digest
+                logging.info('Existing digest found; render skipped: %s', final)
+            else:
+                final = render(merged.resolve(), folder, songs, config, render_date)
             try:
-                supabase_sync_live(folder, songs, date or folder.name[:8], merged, final)
+                supabase_sync_live(folder, songs, render_date, merged, final)
             except Exception as sync_exc:
                 # A cloud/database problem must not destroy a successfully created digest.
                 warnings.append('Supabase sync failed: ' + str(sync_exc))
