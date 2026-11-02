@@ -17,3 +17,9 @@ Thumbs.db
 
 # Old digest backups
 digest_backup_*/
+
+# TikTok Daily Pipeline local/runtime files
+TikTok_DailyPipeline.secret
+TikTok_DailyPipeline_State.csv
+TikTok_DailyPipeline_Retry.csv
+TikTok_DailyPipeline_*_Result.csv

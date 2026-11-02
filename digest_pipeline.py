@@ -3,6 +3,7 @@ import argparse
 import csv
 import difflib
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -523,6 +524,37 @@ def render(video, folder, songs, config, date, preview=False):
 
 
 
+
+def render_full_song_clips_v7(folder, songs, date):
+    """Render missing full-song clips using the separately validated v7 engine.
+
+    Existing clips are never overwritten. Failure is non-fatal for the digest:
+    the caller records a warning and retains the completed digest.
+    """
+    module_path = Path(__file__).with_name('make_full_song_clips_auto_v7.py')
+    if not module_path.is_file():
+        raise FileNotFoundError('Full-song v7 engine not found: ' + str(module_path))
+    spec = importlib.util.spec_from_file_location('full_song_v7', module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    folder = Path(folder).resolve()
+    playlist_path = folder / 'playlist.json'
+    transcript_path = folder / 'transcript.json'
+    if not playlist_path.is_file() or not transcript_path.is_file():
+        raise FileNotFoundError('playlist.json/transcript.json missing for full-song rendering')
+
+    # v7 reads the same canonical playlist.json that the digest uses.
+    rows = module.analyze(folder, render=True)
+    if len(rows) != len(songs):
+        raise RuntimeError(f'Full-song v7 count mismatch: playlist={len(songs)} rendered/analyzed={len(rows)}')
+    low = sum(1 for row in rows if row.get('confidence') == 'low')
+    if low:
+        raise RuntimeError(f'Full-song v7 low-confidence result: {low} song(s)')
+    logging.info('Full-song v7 completed: %s / %d songs / low=%d', date, len(rows), low)
+    return rows
+
+
 def cleanup_source_recordings(inputs, merged):
     """YYYYMMDD_PC.mp4 完成後、同一フォルダ内の元録画partだけ削除する。"""
     merged = Path(merged).resolve()
@@ -682,6 +714,21 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                 logging.info('Existing digest found; render skipped: %s', final)
             else:
                 final = render(merged.resolve(), folder, songs, config, render_date)
+
+            # Full-song generation is downstream of the canonical playlist/digest.
+            # Existing YYYYMMDD_songNN_title.mp4 files are skipped by the v7 engine.
+            try:
+                full_song_rows = render_full_song_clips_v7(folder, songs, render_date)
+                save_json(folder / 'full_song_result.json',
+                          {'status': 'completed', 'songs': len(full_song_rows),
+                           'engine': 'v7', 'existing_files_preserved': True})
+            except Exception as clip_exc:
+                warnings.append('Full-song generation failed: ' + str(clip_exc))
+                logging.exception('Full-song generation failed; digest is retained')
+                save_json(folder / 'full_song_result.json',
+                          {'status': 'failed', 'error': str(clip_exc),
+                           'engine': 'v7', 'digest_retained': True})
+
             try:
                 supabase_sync_live(folder, songs, render_date, merged, final)
             except Exception as sync_exc:
