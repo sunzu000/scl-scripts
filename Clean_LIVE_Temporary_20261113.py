@@ -105,7 +105,7 @@ def run(root, folder, applied, after, rows):
                 reason='PUBLISHED_OR_REVIEW_OR_SONG_OUTPUT'
             elif in_temp and successful and FILE_GENERATED.fullmatch(name):
                 action='DELETE_GENERATED_INTERMEDIATE';reason='VERIFIED_FINAL_DIGEST_AND_COMPLETED_STATE'
-            elif not rel.parts and x.suffix.casefold()=='.mp4' and size in sizes:
+            elif not rel.parts and re.fullmatch(r'(?i)moa_pi_20\d{6}_\d{6}_part\d{4}_\d+\.mp4', name) and size in sizes:
                 # User policy: equal file size and LastWriteTime => remove redundant MP4.
                 # Limit to the LIVE root and retain permanent, published, and original media.
                 try:
