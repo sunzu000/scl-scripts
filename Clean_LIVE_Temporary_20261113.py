@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Conservative LIVE media cleanup. Protect originals, results, all metadata.
 
-- Only files proven SHA256-identical to a YYYYMMDD_PC/HB.mp4 are deduplicated.
+- Top-level MP4s with the same byte size and modification timestamp as YYYYMMDD_PC/HB.mp4 are deduplicated (no hashing).
 - Generated work/overlay_work/preview_work media and subtitles are removed
   only after a validated existing final digest AND successful processing state.
 - Never delete candidate user clips/digests, originals, .part, folders outside LIVE,
@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,7 +26,7 @@ DATE_RE = re.compile(r'^20\d{6}_LIVE$', re.I)
 # Names of directories written by the known digest pipeline, NOT the permanent song_clips folder.
 TEMP_DIRS = {'work','overlay_work','preview_work'}
 FILE_GENERATED = re.compile(r'(?i)^(?:(?:part|normal|clip)_\d{4}\.mp4|list_\d{4}\.ass|(?:parts|normal|clips)\.txt)$')
-# Direct-copy sources in the LIVE folder are candidates only if byte-for-byte duplicates of canonical PC/HB.
+# Direct-copy sources in the LIVE folder are candidates only if size and last-modified time match canonical PC/HB.
 PROTECT_NAME = re.compile(r'(?i)(?:digest|song[_-]?clips|review|preview|published|final|full[_-]?song|thumbnail|cover)')
 
 
@@ -37,13 +36,6 @@ def is_link(p: Path) -> bool:
         return bool(p.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT) if os.name=='nt' else False
     except (OSError, AttributeError):
         return True
-
-
-def sha(p: Path):
-    h=hashlib.sha256()
-    with p.open('rb') as f:
-        for b in iter(lambda:f.read(8*1024*1024),b''):h.update(b)
-    return h.hexdigest()
 
 
 def valid_dates(root):
@@ -83,9 +75,8 @@ def run(root, folder, applied, after, rows):
     if not canon:
         rows.append({'date':date,'path':str(folder),'action':'SKIP','reason':'CANONICAL_PC_HB_MISSING','bytes':0})
         return
-    # Cache canonical hashes by size, and candidate hashes only when sizes can match.
+    # Only stat metadata is read; video contents are never hashed.
     sizes={c.stat().st_size for c in canon}
-    hashes={}
     successful,why=check_successful_final(folder,date)
     # Date-specific postprocessing must have a valid final. Historical dedup only needs a canonical copy.
     for base,dirs,files in os.walk(folder,topdown=True,followlinks=False):
@@ -107,20 +98,17 @@ def run(root, folder, applied, after, rows):
                 reason='PUBLISHED_OR_REVIEW_OR_SONG_OUTPUT'
             elif in_temp and successful and FILE_GENERATED.fullmatch(name):
                 action='DELETE_GENERATED_INTERMEDIATE';reason='VERIFIED_FINAL_DIGEST_AND_COMPLETED_STATE'
-            elif x.suffix.casefold() in {'.mp4','.mov','.mkv','.vob'} and size in sizes:
-                # Hash only a possible exact duplicate of the canonical PC/HB.
+            elif not rel.parts and x.suffix.casefold()=='.mp4' and size in sizes:
+                # User policy: equal file size and LastWriteTime => remove redundant MP4.
+                # Limit to the LIVE root and retain permanent, published, and original media.
                 try:
-                    digest=sha(x)
-                    copies=[]
-                    for c in canon:
-                        if c.stat().st_size!=size:continue
-                        if c not in hashes:hashes[c]=sha(c)
-                        if hashes[c]==digest:copies.append(str(c))
+                    original_mtime=x.stat().st_mtime_ns
+                    copies=[str(c) for c in canon if c.stat().st_size==size and c.stat().st_mtime_ns==original_mtime]
                     if copies:
-                        action='DELETE_EXACT_COPY';reason='SHA256_EQUALS_CANONICAL '+copies[0]
-                    else:reason='SAME_SIZE_BUT_SHA_DIFFERS'
+                        action='DELETE_METADATA_MATCH';reason='SIZE_AND_MTIME_EQUALS_CANONICAL '+copies[0]
+                    else:reason='SAME_SIZE_BUT_MTIME_DIFFERS'
                 except OSError as exc:
-                    action='KEEP';reason='HASH_ERROR '+type(exc).__name__
+                    action='KEEP';reason='METADATA_ERROR '+type(exc).__name__
             elif in_temp:
                 reason='TEMP_NOT_VERIFIED '+why
             elif x.suffix.casefold() in {'.mp4','.mov','.mkv','.vob'}:
@@ -129,9 +117,10 @@ def run(root, folder, applied, after, rows):
                 try:
                     # Revalidate no concurrent change just before deletion.
                     if is_link(x) or not x.is_file() or x.stat().st_size!=size: raise OSError('FILE_CHANGED')
-                    if action=='DELETE_EXACT_COPY':
-                        dig=sha(x)
-                        if not any(c.stat().st_size==size and (hashes[c] if c in hashes else sha(c))==dig for c in canon):raise OSError('HASH_CHANGED')
+                    if action=='DELETE_METADATA_MATCH':
+                        candidate_stat=x.stat()
+                        if not any(c.stat().st_size==size and c.stat().st_mtime_ns==candidate_stat.st_mtime_ns for c in canon):
+                            raise OSError('METADATA_CHANGED')
                     x.unlink()
                     action='DELETED'
                 except OSError as exc:
