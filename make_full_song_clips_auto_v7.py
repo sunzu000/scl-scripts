@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import argparse,csv,json,re,statistics,subprocess,sys
+import argparse,csv,json,re,statistics,subprocess,sys,hashlib,datetime
 from pathlib import Path
 
 ROOT=Path(r"F:\SCL\TikTok")
@@ -64,7 +64,7 @@ def detect(title,start,next_start,segs):
     if k in MASTER:
         # Verified master is the strongest prior: performance end + 4 sec MC.
         target=start+MASTER[k]+MC_KEEP
-        return min(target,upper),"high","verified_master_plus_mc",None,"",MASTER[k]+MC_KEEP
+        return min(target,upper),"medium","master_duration_estimate_unverified",None,"",MASTER[k]+MC_KEEP
     if vals:
         # v4: repeated performances may have different accepted durations.
         # Pick among accepted durations only; transcript may choose the matching
@@ -90,10 +90,10 @@ def detect(title,start,next_start,segs):
             ranked.sort(key=lambda x:(x[0],x[1]))
             dist,negscore,chosen,near=ranked[0]
             if dist <= 5.0:
-                return min(chosen,upper),"high","teacher_variant_by_close_mc",near[1],near[2],chosen-start
+                return min(chosen,upper),"medium","teacher_variant_estimate_unverified",near[1],near[2],chosen-start
         # Ambiguous MC: use robust center of accepted performances.
         chosen=start+med
-        return min(chosen,upper),"high","teacher_median_ambiguous_mc",None,"",med
+        return min(chosen,upper),"medium","teacher_median_estimate_unverified",None,"",med
 
     # Unknown title: search later half, prefer sustained post-song conversation.
     lo=start+120
@@ -125,10 +125,25 @@ def safe(s):return re.sub(r'[\\/:*?"<>|]','_',s).strip()
 
 def analyze(folder,render=False):
     date=folder.name[:8]; pp=playlist_file(folder); tp=transcript_file(folder)
-    if not pp or not tp:return []
+    if not pp or not tp:raise FileNotFoundError("playlist.json or transcript.json missing: "+str(folder))
     pl=load(pp); tr=load(tp)
     if isinstance(tr,dict):tr=tr.get("segments",[])
+    if not isinstance(pl,list) or not pl:
+        raise ValueError("Playlist empty or malformed: "+str(pp))
+    if not isinstance(tr,list):
+        raise ValueError("Transcript malformed: "+str(tp))
+    previous=-1
+    for item in pl:
+        if not isinstance(item,dict) or "start" not in item or "title" not in item:
+            raise ValueError("Playlist entry missing title/start")
+        st=float(item["start"])
+        if st<=previous or st<0:
+            raise ValueError("Playlist starts not strictly increasing")
+        previous=st
     src=source(folder,date) if render else None
+    # Fail closed: legacy automatic invocation must never render unreviewed boundaries.
+    if render:
+        raise RuntimeError("Full-song v7 automatic render blocked: manual boundary review required. Run --date YYYYMMDD for report only.")
     rows=[]
     for i,x in enumerate(pl):
         st=float(x["start"]); nxt=float(pl[i+1]["start"]) if i+1<len(pl) else None
@@ -137,6 +152,8 @@ def analyze(folder,render=False):
              "end":round(en,3),"duration":round(en-st,3),"confidence":conf,"method":method,
              "mc_start":"" if mc is None else round(mc,3),
              "teacher_median":"" if med is None else round(med,3),"mc_text":txt}
+        if en <= st:
+            raise ValueError("Invalid end <= start for "+str(x.get("title")))
         rows.append(row)
         if render:
             if src is None:raise FileNotFoundError("source MP4 not found")
@@ -168,7 +185,21 @@ def main():
     if not a.date and not a.all:ap.error("--date or --all")
     rows=[]
     for f in folders(a.date):rows+=analyze(f,a.render)
-    rp=ROOT/(f"{a.date}_full_song_auto_report_v7.csv" if a.date else "full_song_auto_report_ALL_v7.csv")
+    # WORK_CLOSURE_20261113_REPORT_POLICY: approved date reports belong to source LIVE.
+    today=datetime.date.today()
+    if a.date:
+        report_day=datetime.datetime.strptime(a.date,"%Y%m%d").date()
+        live_report_dir=Path(r"F:\SCL\TikTok")/report_day.strftime("%Y")/report_day.strftime("%Y%m")/(a.date+"_LIVE")
+        if not live_report_dir.is_dir():
+            raise FileNotFoundError("LIVE folder missing for daily report: "+str(live_report_dir))
+        rp=live_report_dir/(f"{a.date}_full_song_auto_report_v7.csv")
+    else:
+        # ALL-mode summary is disposable; create its working directory if needed.
+        work_report_dir=Path(r"C:\SCL\WORK\TikTok\FullSongReports")/today.strftime("%Y")/today.strftime("%Y%m")/today.strftime("%Y%m%d")
+        work_report_dir.mkdir(parents=True,exist_ok=True)
+        rp=work_report_dir/"full_song_auto_report_ALL_v7.csv"
+    if rp.exists():
+        rp=rp.with_name(rp.stem+"_"+datetime.datetime.now().strftime("%H%M%S_%f")+rp.suffix)
     write(rows,rp)
     print("[REPORT]",rp);print("[SUMMARY]",len(rows),"songs; low=",sum(r["confidence"]=="low" for r in rows))
 if __name__=="__main__":main()

@@ -556,21 +556,9 @@ def render_full_song_clips_v7(folder, songs, date):
 
 
 def cleanup_source_recordings(inputs, merged):
-    """YYYYMMDD_PC.mp4 完成後、同一フォルダ内の元録画partだけ削除する。"""
-    merged = Path(merged).resolve()
-    folder = merged.parent
-    removed = []
-    for source in inputs:
-        p = Path(source).resolve()
-        if p == merged or p.parent != folder:
-            continue
-        name = p.name.lower()
-        if "_part" not in name or not (name.endswith(".mp4") or name.endswith(".mp4.part")):
-            continue
-        if p.is_file():
-            p.unlink()
-            removed.append(str(p))
-    return removed
+    """Keep original recording parts for later recovery."""
+    logging.info('Original recording parts retained: %d', len(inputs))
+    return []
 
 
 def supabase_sync_live(folder, songs, date, video=None, digest=None):
@@ -685,7 +673,13 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                 old = folder / 'input_fingerprint.txt'
                 if not merged.exists() or not old.exists() or old.read_text() != fingerprint:
                     merged, warnings = merge_inputs(inputs, folder, config['ffmpeg'])
-                    (folder / 'transcript.json').unlink(missing_ok=True)
+                    previous_transcript = folder / 'transcript.json'
+                    if previous_transcript.is_file():
+                        import shutil
+                        from datetime import datetime
+                        backup_transcript = folder / ('transcript.previous_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.json')
+                        shutil.copy2(previous_transcript, backup_transcript)
+                        previous_transcript.unlink()
                     old.write_text(fingerprint)
                 else:
                     warnings = json.loads((folder / 'source_parts.json').read_text(encoding='utf-8'))['warnings']
@@ -698,15 +692,33 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                 if playlist:
                     songs = json.loads(Path(playlist).read_text(encoding='utf-8-sig'))
                 else:
-                    songs = detect_songs(segments, config['songs'], config['clip_seconds'])
-                    songs, onset_warnings = refine_onsets(merged, folder, songs, config)
-                    warnings.extend(onset_warnings)
+                    # SAFE RESTORE (2026-11-05): automatic lyric matches are only
+                    # unverified suggestions. Never overwrite a reviewed playlist,
+                    # and never render an incomplete automatic candidate list.
+                    candidates = detect_songs(segments, config['songs'], config['clip_seconds'])
+                    save_json(folder / 'playlist_auto_candidates.json', candidates)
+                    (folder / 'NEXT_STEP.txt').write_text(
+                        '文字起こし完了。transcript.txt または transcript.json を ChatGPT に渡し、'
+                        '全文・前後のMC・歌詞から全歌唱曲と歌い始めを判定してください。\n'
+                        'playlist_auto_candidates.json は参考候補であり、全曲一覧ではありません。\n'
+                        '確認後に playlist.json を保存し、--render-only で動画生成してください。\n'
+                        '既存の playlist.json と完成動画は自動で変更しません。\n',
+                        encoding='utf-8')
+                    save_json(state_path, {
+                        'status': 'awaiting_playlist',
+                        'review_required': True,
+                        'candidate_count': len(candidates),
+                        'warning': 'Automatic lyric matching is incomplete; manual full-transcript review required',
+                        'existing_playlist_preserved': True,
+                    })
+                    logging.info('Transcript complete; awaiting manually reviewed playlist; auto-render disabled')
+                    return None
                 write_playlist(folder, songs, merged, warnings)
             else:
                 songs = json.loads((folder / 'playlist.json').read_text(encoding='utf-8-sig'))
                 warnings = ['Manual re-render; see source_parts.json for original input warnings.']
                 # Do not overwrite manual corrections in playlist.json.
-                write_playlist(folder, songs, merged, warnings)
+                logging.info('Manual playlist.json retained unchanged during render-only')
             render_date = date or folder.name[:8]
             existing_digest = folder / f'{render_date}_digest.mp4'
             if existing_digest.is_file() and not render_only:
@@ -738,6 +750,15 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
             save_json(state_path, {'status': 'completed_candidates', 'output': str(final),
                                   'songs': len(songs), 'warnings': warnings,
                                   'review_required': True})
+            # LIVE_TEMP_CLEANUP_HOOK_20261113
+            try:
+                cleanup_file = Path(__file__).with_name("Clean_LIVE_Temporary_20261113.py")
+                if cleanup_file.is_file():
+                    cleanup_result = subprocess.run([sys.executable, str(cleanup_file), "--date", render_date, "--apply", "--after-process"], timeout=3600, check=False)
+                    if cleanup_result.returncode != 0:
+                        logging.warning("LIVE temporary cleanup returned %s; originals and digest kept", cleanup_result.returncode)
+            except Exception as cleanup_error:
+                logging.exception("LIVE temporary cleanup skipped: %s", cleanup_error)
             return final
         except Exception as exc:
             save_json(state_path, {'status': 'failed', 'error': str(exc)})
