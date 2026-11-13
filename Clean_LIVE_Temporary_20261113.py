@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Conservative LIVE media cleanup. Protect originals, results, all metadata.
 
-- Recording parts are retired at PC creation by digest_pipeline.py using the known input list; this tool does not guess or delete them later.
+- Recorder parts remain protected after PC creation; this tool never removes them or guesses duplicates from size or timestamps.
 - Generated work/overlay_work/preview_work media and subtitles are removed
   only after a validated existing final digest AND successful processing state.
 - Never delete candidate user clips/digests, originals, .part, folders outside LIVE,
