@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Conservative LIVE media cleanup. Protect originals, results, all metadata.
 
-- Top-level MP4s with the same byte size and modification timestamp as YYYYMMDD_PC/HB.mp4 are deduplicated (no hashing).
+- Top-level MP4s with the same byte size and modification timestamp (Windows Explorer minute precision) as YYYYMMDD_PC/HB.mp4 are deduplicated (no hashing).
 - Generated work/overlay_work/preview_work media and subtitles are removed
   only after a validated existing final digest AND successful processing state.
 - Never delete candidate user clips/digests, originals, .part, folders outside LIVE,
@@ -36,6 +36,13 @@ def is_link(p: Path) -> bool:
         return bool(p.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT) if os.name=='nt' else False
     except (OSError, AttributeError):
         return True
+
+
+def mtime_minute(path: Path):
+    # Match the minute-level LastWriteTime shown by Windows File Explorer.
+    # The source MP4 contents are intentionally not inspected.
+    t = datetime.datetime.fromtimestamp(path.stat().st_mtime)
+    return (t.year, t.month, t.day, t.hour, t.minute)
 
 
 def valid_dates(root):
@@ -102,8 +109,8 @@ def run(root, folder, applied, after, rows):
                 # User policy: equal file size and LastWriteTime => remove redundant MP4.
                 # Limit to the LIVE root and retain permanent, published, and original media.
                 try:
-                    original_mtime=x.stat().st_mtime_ns
-                    copies=[str(c) for c in canon if c.stat().st_size==size and c.stat().st_mtime_ns==original_mtime]
+                    original_mtime=mtime_minute(x)
+                    copies=[str(c) for c in canon if c.stat().st_size==size and mtime_minute(c)==original_mtime]
                     if copies:
                         action='DELETE_METADATA_MATCH';reason='SIZE_AND_MTIME_EQUALS_CANONICAL '+copies[0]
                     else:reason='SAME_SIZE_BUT_MTIME_DIFFERS'
@@ -118,8 +125,7 @@ def run(root, folder, applied, after, rows):
                     # Revalidate no concurrent change just before deletion.
                     if is_link(x) or not x.is_file() or x.stat().st_size!=size: raise OSError('FILE_CHANGED')
                     if action=='DELETE_METADATA_MATCH':
-                        candidate_stat=x.stat()
-                        if not any(c.stat().st_size==size and c.stat().st_mtime_ns==candidate_stat.st_mtime_ns for c in canon):
+                        if not any(c.stat().st_size==size and mtime_minute(c)==mtime_minute(x) for c in canon):
                             raise OSError('METADATA_CHANGED')
                     x.unlink()
                     action='DELETED'
