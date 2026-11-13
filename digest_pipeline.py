@@ -125,12 +125,16 @@ def merge_inputs(inputs, folder, ffmpeg):
     if not had_target and len(originals) == 1 and is_recording_part(originals[0], target):
         source = originals[0]
         duration, streams = probe(ffmpeg, source)
-        save_json(previous, {
-            'inputs': all_source_names, 'included_durations': [duration], 'warnings': [],
-            'source_policy': 'single_validated_part_renamed_to_PC',
-            'note': 'Single source moved without copying; use the canonical PC for recovery.'
-        })
         os.replace(source, target)
+        try:
+            save_json(previous, {
+                'inputs': all_source_names, 'included_durations': [duration], 'warnings': [],
+                'source_policy': 'single_validated_part_renamed_to_PC',
+                'note': 'Single source moved without copying; use the canonical PC for recovery.'
+            })
+        except Exception:
+            os.replace(target, source)
+            raise
         logging.info('PC created by moving validated source without copying: %s', target)
         return target, []
 
@@ -152,8 +156,8 @@ def merge_inputs(inputs, folder, ffmpeg):
             signatures.append(signature(streams))
         except (subprocess.CalledProcessError, ValueError) as exc:
             warnings.append(f'Unreadable input retained: {source}: {exc}')
-    if not parts:
-        raise RuntimeError('No readable recordings. Originals have been retained.')
+    if warnings or len(parts) != len(originals):
+        raise RuntimeError('SOME_SOURCE_PARTS_UNREADABLE_NO_PC_REPLACEMENT: ' + '; '.join(warnings))
     temporary = folder / (target.stem + '.pending.mp4')
     compatible = all(s == signatures[0] for s in signatures)
     concat_list(work / 'parts.txt', parts)
@@ -220,7 +224,7 @@ def is_recording_part(path, merged):
     return (path.parent == merged.parent
             and path != merged
             and not path.is_symlink()
-            and re.fullmatch(r'moa_pi_20\\d{6}_\\d{6}_part\\d{4}_\\d+\\.mp4', path.name, re.I) is not None)
+            and re.fullmatch(r'moa_pi_20\d{6}_\d{6}_part\d{4}_\d+\.mp4', path.name, re.I) is not None)
 
 
 
@@ -756,6 +760,7 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                     prior = json.loads(manifest_file.read_text(encoding='utf-8-sig'))
                 known = {str(Path(p).resolve()).casefold() for p in prior.get('inputs', [])}
                 normalized_inputs = [Path(p).resolve() for p in inputs]
+                fresh = []
                 if merged.is_file() and manifest_file.is_file():
                     fresh = [p for p in normalized_inputs if str(p).casefold() not in known]
                     if fresh:
@@ -775,9 +780,9 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                 if manifest_file.is_file():
                     old = folder / 'input_fingerprint.txt'
                     if not old.exists():
-                        old.write_text('source_parts_manifest_v2\\n', encoding='utf-8')
+                        old.write_text('source_parts_manifest_v2\n', encoding='utf-8')
                 # Keep the previous transcript by moving, never by copying it.
-                if 'fresh' in locals() and fresh:
+                if fresh:
                     previous_transcript = folder / 'transcript.json'
                     if previous_transcript.is_file():
                         from datetime import datetime
