@@ -99,50 +99,12 @@ def pc_video_path(folder):
 
 
 def merge_inputs(inputs, folder, ffmpeg):
-    """Create the canonical PC file and retire only parts consumed successfully.
-
-    For a single ready recorder MP4, use a same-volume rename instead of copying.
-    For a later session on the same day, include the existing PC as the first
-    source; never replace a previous session with only the latest part.
-    """
-    folder = Path(folder).resolve()
-    target = pc_video_path(folder)
-    originals = [Path(p).resolve() for p in inputs]
-    if not originals:
-        raise RuntimeError('NO_RECORDING_INPUTS')
-    had_target = target.is_file()
-    if had_target and target not in originals:
-        raise RuntimeError('PC_EXISTS_MERGE_MUST_INCLUDE_PREVIOUS_PC')
-    previous = folder / 'source_parts.json'
-    prior = {}
-    if had_target and previous.is_file():
-        prior = json.loads(previous.read_text(encoding='utf-8-sig'))
-    prior_input_names = [str(p) for p in prior.get('inputs', [])]
-    new_input_names = [str(p) for p in originals if p != target]
-    all_source_names = list(dict.fromkeys(prior_input_names + new_input_names))
-
-    # One validated complete part can become PC without any second MP4 on disk.
-    if not had_target and len(originals) == 1 and is_recording_part(originals[0], target):
-        source = originals[0]
-        duration, streams = probe(ffmpeg, source)
-        os.replace(source, target)
-        try:
-            save_json(previous, {
-                'inputs': all_source_names, 'included_durations': [duration], 'warnings': [],
-                'source_policy': 'single_validated_part_renamed_to_PC',
-                'note': 'Single source moved without copying; use the canonical PC for recovery.'
-            })
-        except Exception:
-            os.replace(target, source)
-            raise
-        logging.info('PC created by moving validated source without copying: %s', target)
-        return target, []
-
     work = folder / 'work'
     work.mkdir(exist_ok=True)
     warnings = []
     parts, durations, signatures = [], [], []
-    for index, source in enumerate(originals):
+    for index, source in enumerate(inputs):
+        source = Path(source).resolve()
         if not source.is_file() or source.stat().st_size == 0:
             warnings.append('Missing/empty input: ' + str(source))
             continue
@@ -156,12 +118,12 @@ def merge_inputs(inputs, folder, ffmpeg):
             signatures.append(signature(streams))
         except (subprocess.CalledProcessError, ValueError) as exc:
             warnings.append(f'Unreadable input retained: {source}: {exc}')
-    if warnings or len(parts) != len(originals):
-        raise RuntimeError('SOME_SOURCE_PARTS_UNREADABLE_NO_PC_REPLACEMENT: ' + '; '.join(warnings))
+    if not parts:
+        raise RuntimeError('No readable recordings. Originals have been retained.')
+    target = pc_video_path(folder)
     temporary = folder / (target.stem + '.pending.mp4')
     compatible = all(s == signatures[0] for s in signatures)
     concat_list(work / 'parts.txt', parts)
-    normalized = False
     try:
         if not compatible:
             raise ValueError('Different recording formats')
@@ -172,16 +134,15 @@ def merge_inputs(inputs, folder, ffmpeg):
         if abs(duration - sum(durations)) > max(2, len(parts)):
             raise ValueError('Merged duration mismatch')
     except (subprocess.CalledProcessError, ValueError):
-        normalized = True
-        normalized_parts = []
+        normalized = []
         for i, part in enumerate(parts):
             normal = work / f'normal_{i:04d}.mp4'
             run([ffmpeg, '-hide_banner', '-loglevel', 'warning', '-y', '-i', part,
                  '-vf', 'scale=trunc(iw*sar/2)*2:ih,setsar=1,scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30',
                  '-c:v', 'libx264', '-threads', '2', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p',
                  '-c:a', 'aac', '-ar', '48000', '-ac', '2', normal])
-            normalized_parts.append(normal)
-        concat_list(work / 'normal.txt', normalized_parts)
+            normalized.append(normal)
+        concat_list(work / 'normal.txt', normalized)
         run([ffmpeg, '-hide_banner', '-loglevel', 'warning', '-y', '-f', 'concat',
              '-safe', '0', '-i', 'normal.txt', '-c', 'copy', '-movflags', '+faststart',
              temporary.resolve()], cwd=work)
@@ -189,43 +150,13 @@ def merge_inputs(inputs, folder, ffmpeg):
         if abs(duration - sum(durations)) > max(2, len(parts)):
             raise ValueError('Merged duration mismatch after normalization')
     os.replace(temporary, target)
-    # Confirm the published canonical source before deleting any consumed inputs.
-    final_duration, _ = probe(ffmpeg, target)
-    if abs(final_duration - sum(durations)) > max(2, len(parts)):
-        raise RuntimeError('PUBLISHED_PC_DURATION_MISMATCH_SOURCE_PARTS_RETAINED')
-    manifest = {'inputs': all_source_names,
-                'included_durations': durations, 'warnings': warnings,
-                'source_policy': 'retire_recording_parts_only_after_validated_PC',
-                'normalized': normalized,
-                'note': 'Missing time is not filled; overlaps are not automatically removed.'}
-    save_json(previous, manifest)
-    # Never delete an input if anything was skipped, normalization was required,
-    # or the original PC was consumed as the first source of an incremental merge.
-    new_parts = [p for p in originals if p != target]
-    if not warnings and not normalized and len(parts) == len(originals):
-        removed_sources = cleanup_source_recordings(new_parts, target)
-        manifest['retired_inputs'] = removed_sources
-        save_json(previous, manifest)
-    else:
-        logging.warning('Original parts retained because merge was incomplete or normalized')
-    # The PC source is durable; do not keep extra remuxed working copies.
-    for intermediate in [*parts, *(work.glob('normal_????.mp4')),
-                         work / 'parts.txt', work / 'normal.txt']:
-        if intermediate.is_file() and not intermediate.is_symlink():
-            try: intermediate.unlink()
-            except OSError: logging.warning('Could not remove intermediate: %s', intermediate)
+    save_json(folder / 'source_parts.json', {'inputs': [str(p) for p in inputs],
+              'included_durations': durations, 'warnings': warnings,
+              'note': 'Missing time is not filled; overlaps are not automatically removed.'})
+    removed_sources = cleanup_source_recordings(inputs, target)
+    if removed_sources:
+        logging.info('Merged video verified; removed %d source recording part(s)', len(removed_sources))
     return target, warnings
-
-
-def is_recording_part(path, merged):
-    """Restrict retirement to completed recorder MP4s within the same LIVE folder."""
-    path = Path(path)
-    merged = Path(merged)
-    return (path.parent == merged.parent
-            and path != merged
-            and not path.is_symlink()
-            and re.fullmatch(r'moa_pi_20\d{6}_\d{6}_part\d{4}_\d+\.mp4', path.name, re.I) is not None)
-
 
 
 def stamp(seconds):
@@ -625,24 +556,9 @@ def render_full_song_clips_v7(folder, songs, date):
 
 
 def cleanup_source_recordings(inputs, merged):
-    """Retire only known source parts after merge, validation, and manifest save."""
-    retired = []
-    for item in inputs:
-        p = Path(item).resolve()
-        if not is_recording_part(p, merged):
-            logging.info('Non-recording input protected: %s', p)
-            continue
-        if not p.is_file():
-            continue
-        try:
-            if p.stat().st_size == 0:
-                continue
-            p.unlink()
-            retired.append(str(p))
-            logging.info('Consumed LIVE recording source removed after PC finalized: %s', p)
-        except OSError:
-            logging.exception('Could not retire original recorder part: %s', p)
-    return retired
+    """Keep original recording parts for later recovery."""
+    logging.info('Original recording parts retained: %d', len(inputs))
+    return []
 
 
 def supabase_sync_live(folder, songs, date, video=None, digest=None):
@@ -751,43 +667,22 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
             merged = pc_video_path(folder)
             warnings = []
             if not render_only:
-                # A source part may have been renamed/deleted after the PC was
-                # validated. Use source_parts.json to identify consumed sources,
-                # not current file timestamps or equality of MP4 bytes.
-                manifest_file = folder / 'source_parts.json'
-                prior = {}
-                if manifest_file.is_file():
-                    prior = json.loads(manifest_file.read_text(encoding='utf-8-sig'))
-                known = {str(Path(p).resolve()).casefold() for p in prior.get('inputs', [])}
-                normalized_inputs = [Path(p).resolve() for p in inputs]
-                fresh = []
-                if merged.is_file() and manifest_file.is_file():
-                    fresh = [p for p in normalized_inputs if str(p).casefold() not in known]
-                    if fresh:
-                        if any(not p.is_file() for p in fresh):
-                            raise RuntimeError('NEW_LIVE_SOURCE_MISSING_NO_OVERWRITE')
-                        # Append rather than overwrite earlier same-day recordings.
-                        merged, warnings = merge_inputs([merged, *fresh], folder, config['ffmpeg'])
-                    else:
-                        warnings = prior.get('warnings', [])
-                        logging.info('Existing PC reused; previously consumed parts are not required')
-                elif merged.exists():
-                    raise RuntimeError('EXISTING_PC_WITHOUT_MANIFEST_NO_OVERWRITE')
-                else:
-                    if any(not p.is_file() for p in normalized_inputs):
-                        raise RuntimeError('INITIAL_LIVE_SOURCE_MISSING')
-                    merged, warnings = merge_inputs(normalized_inputs, folder, config['ffmpeg'])
-                if manifest_file.is_file():
-                    old = folder / 'input_fingerprint.txt'
-                    if not old.exists():
-                        old.write_text('source_parts_manifest_v2\n', encoding='utf-8')
-                # Keep the previous transcript by moving, never by copying it.
-                if fresh:
+                fingerprint = hashlib.sha256(json.dumps([
+                    [str(Path(p).resolve()), Path(p).stat().st_size, Path(p).stat().st_mtime_ns]
+                    for p in inputs], ensure_ascii=False).encode()).hexdigest()
+                old = folder / 'input_fingerprint.txt'
+                if not merged.exists() or not old.exists() or old.read_text() != fingerprint:
+                    merged, warnings = merge_inputs(inputs, folder, config['ffmpeg'])
                     previous_transcript = folder / 'transcript.json'
                     if previous_transcript.is_file():
+                        import shutil
                         from datetime import datetime
                         backup_transcript = folder / ('transcript.previous_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.json')
-                        os.replace(previous_transcript, backup_transcript)
+                        shutil.copy2(previous_transcript, backup_transcript)
+                        previous_transcript.unlink()
+                    old.write_text(fingerprint)
+                else:
+                    warnings = json.loads((folder / 'source_parts.json').read_text(encoding='utf-8'))['warnings']
                 if transcript:
                     segments = read_transcript(transcript)
                     save_json(folder / 'transcript.json', segments)
