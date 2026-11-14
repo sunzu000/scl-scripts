@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Conservative LIVE media cleanup. Protect originals, results, all metadata.
 
-- Recorder parts remain protected after PC creation; this tool never removes them or guesses duplicates from size or timestamps.
+- Original recorder parts and top-level MP4s are preserved, regardless of size or modification time.
 - Generated work/overlay_work/preview_work media and subtitles are removed
   only after a validated existing final digest AND successful processing state.
 - Never delete candidate user clips/digests, originals, .part, folders outside LIVE,
@@ -26,7 +26,7 @@ DATE_RE = re.compile(r'^20\d{6}_LIVE$', re.I)
 # Names of directories written by the known digest pipeline, NOT the permanent song_clips folder.
 TEMP_DIRS = {'work','overlay_work','preview_work'}
 FILE_GENERATED = re.compile(r'(?i)^(?:(?:part|normal|clip)_\d{4}\.mp4|list_\d{4}\.ass|(?:parts|normal|clips)\.txt)$')
-# Do not infer redundant recorder parts from file size, timestamp, or video hash after the fact.
+# Never deduplicate original recordings by byte size or modified time.
 PROTECT_NAME = re.compile(r'(?i)(?:digest|song[_-]?clips|review|preview|published|final|full[_-]?song|thumbnail|cover)')
 
 
@@ -75,7 +75,7 @@ def run(root, folder, applied, after, rows):
     if not canon:
         rows.append({'date':date,'path':str(folder),'action':'SKIP','reason':'CANONICAL_PC_HB_MISSING','bytes':0})
         return
-    # Media metadata is only inspected; original recorder parts are never deduplicated here.
+    # Preserve all top-level input MP4s, including original recorder parts.
     successful,why=check_successful_final(folder,date)
     # Date-specific postprocessing must have a valid final. Historical dedup only needs a canonical copy.
     for base,dirs,files in os.walk(folder,topdown=True,followlinks=False):
