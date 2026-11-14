@@ -514,7 +514,10 @@ def render(video, folder, songs, config, date, preview=False):
         if abs(actual-expected) > max(1,len(songs)*.1):
             raise ValueError('Digest duration mismatch')
         final=folder/f'{date}_digest.mp4'
-        os.replace(temp,final)
+        if final.exists():
+            raise RuntimeError('EXISTING_DIGEST_REFUSE_OVERWRITE')
+        # On Windows os.rename refuses to overwrite an existing file.
+        os.rename(temp,final)
     save_json(folder/'render_result.json',{'source':str(video),'source_duration':source_duration,
               'source_video_stream':next(s for s in streams if s['codec_type']=='video'),
               'output':str(final),'preview':preview,'songs':len(songs),
@@ -661,6 +664,16 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
     folder = Path(folder).resolve()
     folder.mkdir(parents=True, exist_ok=True)
     with FileLock(folder / 'processing.lock'):
+        # DIGEST_UNREVIEWED_DELIVERY_20261114: a queued candidate is not re-rendered.
+        delivery_record = folder / 'digest_delivery.json'
+        if delivery_record.exists():
+            if not render_only:
+                raise RuntimeError('NEW_RECORDING_WITH_EXISTING_REVIEW_CANDIDATE_REQUIRES_MANUAL_CHECK')
+            import Digest_Unreviewed_Delivery_20261114 as delivery
+            reviewed = delivery.find_existing(folder, date or folder.name[:8])
+            if reviewed is not None:
+                logging.info('Previously rendered digest retained: %s', reviewed)
+                return reviewed
         state_path = folder / 'state.json'
         save_json(state_path, {'status': 'running'})
         try:
@@ -721,11 +734,20 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                 logging.info('Manual playlist.json retained unchanged during render-only')
             render_date = date or folder.name[:8]
             existing_digest = folder / f'{render_date}_digest.mp4'
-            if existing_digest.is_file() and not render_only:
+            rendered_new = False
+            if existing_digest.is_file():
                 final = existing_digest
-                logging.info('Existing digest found; render skipped: %s', final)
+                logging.info('Existing digest protected; render skipped: %s', final)
             else:
+                import Digest_Unreviewed_Delivery_20261114 as delivery
+                queued = delivery.find_existing(folder, render_date)
+                if queued is not None:
+                    logging.info('Unreviewed video already exists; no duplicate render: %s', queued)
+                    save_json(state_path, {'status':'completed_candidates','output':str(queued),
+                                           'songs':len(songs),'review_required':True})
+                    return queued
                 final = render(merged.resolve(), folder, songs, config, render_date)
+                rendered_new = True
 
             # Full-song generation is downstream of the canonical playlist/digest.
             # Existing YYYYMMDD_songNN_title.mp4 files are skipped by the v7 engine.
@@ -741,15 +763,10 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                           {'status': 'failed', 'error': str(clip_exc),
                            'engine': 'v7', 'digest_retained': True})
 
-            try:
-                supabase_sync_live(folder, songs, render_date, merged, final)
-            except Exception as sync_exc:
-                # A cloud/database problem must not destroy a successfully created digest.
-                warnings.append('Supabase sync failed: ' + str(sync_exc))
-                logging.exception('Supabase sync failed; digest is retained')
+            # Complete the local render and cleanup before moving a fresh candidate.
             save_json(state_path, {'status': 'completed_candidates', 'output': str(final),
-                                  'songs': len(songs), 'warnings': warnings,
-                                  'review_required': True})
+                                   'songs': len(songs), 'warnings': warnings,
+                                   'review_required': True})
             # LIVE_TEMP_CLEANUP_HOOK_20261113
             try:
                 cleanup_file = Path(__file__).with_name("Clean_LIVE_Temporary_20261113.py")
@@ -759,6 +776,28 @@ def process(inputs, folder, config, transcript=None, playlist=None, date='', ren
                         logging.warning("LIVE temporary cleanup returned %s; originals and digest kept", cleanup_result.returncode)
             except Exception as cleanup_error:
                 logging.exception("LIVE temporary cleanup skipped: %s", cleanup_error)
+            if rendered_new:
+                try:
+                    # One rename on the same F: volume, never a second video copy.
+                    import Digest_Unreviewed_Delivery_20261114 as delivery
+                    final = delivery.deliver_new(folder, render_date)
+                    logging.info('UNREVIEWED_VIDEO_READY %s', final)
+                except Exception as delivery_error:
+                    warnings.append('Review delivery failed: ' + str(delivery_error))
+                    logging.exception('Delivery blocked; new digest retained in LIVE')
+                    state = json.loads(state_path.read_text(encoding='utf-8-sig'))
+                    state['delivery_status'] = 'error'
+                    state['delivery_error'] = str(delivery_error)
+                    save_json(state_path, state)
+            try:
+                # The DB path must identify the *actual* current MP4 location.
+                supabase_sync_live(folder, songs, render_date, merged, final)
+            except Exception as sync_exc:
+                warnings.append('Supabase sync failed: ' + str(sync_exc))
+                logging.exception('Supabase sync failed; digest is retained')
+            state = json.loads(state_path.read_text(encoding='utf-8-sig'))
+            state['warnings'] = warnings
+            save_json(state_path, state)
             return final
         except Exception as exc:
             save_json(state_path, {'status': 'failed', 'error': str(exc)})
