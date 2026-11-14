@@ -54,7 +54,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [OK] Digest completed:
-echo %DIGEST%
+echo [OK] Digest processing completed. Review status:
+python -c "import json,sys; from pathlib import Path; f=Path(r'%FOLDER%'); sp=f/'state.json'; mp=f/'digest_delivery.json'; s=json.loads(sp.read_text(encoding='utf-8-sig')) if sp.is_file() else {}; m=json.loads(mp.read_text(encoding='utf-8-sig')) if mp.is_file() else {}; out=m.get('pending_path'); pending=bool(out and Path(out).is_file()); error=s.get('delivery_status')=='error'; live=(f/'%DATE%_digest.mp4').is_file(); print('[ERROR] Delivery blocked; check state.json; digest remains in LIVE' if error else ('[UNREVIEWED] '+out if pending else ('[LIVE] %DIGEST%' if live else '[ERROR] Digest result missing'))); sys.exit(2 if error or not (pending or live) else 0)"
+if errorlevel 1 exit /b 2
 
 endlocal
