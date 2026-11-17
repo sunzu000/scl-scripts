@@ -485,5 +485,7 @@ print("DB_REGISTERED:", len(registered), flush=True)
 for typ, title, vid, media_id in registered:
     print(f"REGISTERED: {typ} | {title} | media_id={media_id} | https://www.tiktok.com/video/{vid}", flush=True)
 print("WRITE_ERRORS:", len(write_errors), flush=True)
-if write_errors:
-    sys.exit(f"ERROR: {len(write_errors)} Supabase DB/state writes failed; see DB_WRITE_ERROR and STATE_WRITE_ERROR above")
+if failed_accounts:
+    print("ACCOUNT_SCAN_ERRORS:", ",".join(failed_accounts), flush=True)
+if write_errors or failed_accounts:
+    sys.exit(f"ERROR: {len(write_errors)} Supabase DB/state write failures; {len(failed_accounts)} monitored accounts not scanned successfully")
