@@ -28,7 +28,7 @@ jobs:
           ast.parse(s)
           assert 'write_errors.append(("DB_WRITE_ERROR", vid))' in s
           assert 'write_errors.append(("STATE_WRITE_ERROR", vid))' in s
-          assert 'if write_errors or failed_accounts:' in s
+          assert 'if write_errors or failed_accounts or recovery_attention or unseen_retries:' in s
           assert 'if scanned_accounts == 0:' in s
           assert 'sys.exit("ERROR: no active TikTok accounts available for monitoring")' in s
           print("Static failure-reporting checks PASS")
