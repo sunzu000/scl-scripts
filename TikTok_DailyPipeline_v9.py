@@ -219,21 +219,19 @@ def title_hits(text, masters):
             seen.add(x); out.append(x)
     return out
 
-def pending_auto_state_retries(media_rows, original_links, cover_links, state_ids):
-    """Find incomplete v9 registrations, without retrying manually registered media."""
-    auto_linked_ids = {
-        r["media_id"] for r in original_links + cover_links
-        if r.get("match_method") == "auto_tiktok_account_title"
-    }
+def pending_auto_state_retries(media_rows, state_ids):
+    """Retry only v9-owned media missing shared State.
+
+    Legacy imports also used match_method='auto_tiktok_account_title'.
+    That marker is not unique to v9 and MUST NOT trigger reprocessing.
+    A v9-created media row carries its own exact notes marker.
+    """
     return {
         str(m["platform_item_id"])
         for m in media_rows
         if m.get("platform_item_id")
         and str(m["platform_item_id"]) not in state_ids
-        and (
-            (m.get("notes") or "").strip() == "auto_tiktok_daily_v9"
-            or m["media_id"] in auto_linked_ids
-        )
+        and (m.get("notes") or "").strip() == "auto_tiktok_daily_v9"
     }
 
 
@@ -262,7 +260,7 @@ state_known = {
 }
 # A media insert or song-link insert may have succeeded before a later
 # link/State call failed. Such v9-owned rows must NOT be hidden by media.known.
-retryable_auto = pending_auto_state_retries(media, orig_links, cover_links, state_known)
+retryable_auto = pending_auto_state_retries(media, state_known)
 known.difference_update(retryable_auto)
 known |= state_known
 print("SHARED_STATE:", len(state_known), flush=True)
