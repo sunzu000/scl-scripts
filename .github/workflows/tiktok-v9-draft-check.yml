@@ -1,5 +1,8 @@
 name: TikTok v9 Draft Python Check
 on:
+  push:
+    branches:
+      - 'chatgpt/tiktok-v9-report-write-failures-20261117'
   pull_request:
     paths:
       - 'TikTok_DailyPipeline_v9.py'
