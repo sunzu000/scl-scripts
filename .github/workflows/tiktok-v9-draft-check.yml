@@ -163,6 +163,8 @@ jobs:
                       return [{"song_id": x} for x in (original or [])]
                   if table == "cover_song_media_links" and select == "cover_song_id":
                       return [{"cover_song_id": x} for x in (cover or [])]
+                  if table == "song_media_links" and select == "song_id,media_id":
+                      return [{"song_id": x, "media_id": 501} for x in (original or []) if x == "S0001"]
                   return []
               def fake_post(table, payload):
                   events.append((table, payload))
