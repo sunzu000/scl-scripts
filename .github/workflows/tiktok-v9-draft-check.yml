@@ -80,6 +80,8 @@ jobs:
                   "counts": {},
                   "STATE_TABLE": "tiktok_daily_pipeline_state",
                   "state_known": set(),
+                  "retryable_auto": set(),
+                  "new": {},
                   "failed_accounts": list(scan_failures or []),
                   "register_auto_ready": register,
                   "state_upsert": save_state,
@@ -114,5 +116,39 @@ jobs:
           except SystemExit as e:
               assert e.code
           exec(guard_code, {"scanned_accounts": 1, "sys": sys})
+          # Exercise the actual pending-recovery selection from v9 AST.
+          func = next(node for node in parsed.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "pending_auto_state_retries")
+          unit = compile(ast.fix_missing_locations(
+              ast.Module(body=[func], type_ignores=[])), "<recovery_selection>", "exec")
+          recovery = {}
+          exec(unit, recovery)
+          detect = recovery["pending_auto_state_retries"]
+          media = [
+              {"media_id": 101, "platform_item_id": "701", "notes": "auto_tiktok_daily_v9"},
+              {"media_id": 102, "platform_item_id": "702", "notes": "manual"},
+              {"media_id": 103, "platform_item_id": "703", "notes": ""},
+              {"media_id": 104, "platform_item_id": "704", "notes": "auto_tiktok_daily_v9"},
+          ]
+          originals = [{"media_id": 103, "match_method": "auto_tiktok_account_title"}]
+          assert detect(media, originals, [], {"704"}) == {"701", "703"}
+          assert detect(media, originals, [], {"701", "703", "704"}) == set()
+
+          # A failed persisted auto registration that does not reappear in account
+          # discovery must make the job fail, never silently report success.
+          ns = {
+              "registered": [], "state_written": 0, "write_errors": [],
+              "recovery_attention": [], "retryable_auto": {"701"},
+              "new": {}, "OUT": FakeOutput(header), "csv": csv,
+              "STATE_TABLE": "tiktok_daily_pipeline_state",
+              "state_known": set(), "counts": {}, "failed_accounts": [],
+              "print": lambda *args, **kwargs: None, "sys": sys,
+          }
+          try:
+              exec(end_code, ns)
+              raise AssertionError("Missing rediscovery must fail")
+          except SystemExit as exc:
+              assert exc.code
+          print("Recovery selection and missing-rediscovery failure checks PASS")
           print("Five isolated normal/error cases and zero-account guard PASS")
           PY
