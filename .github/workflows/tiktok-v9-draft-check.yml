@@ -78,6 +78,7 @@ jobs:
                   "csv": csv,
                   "sys": sys,
                   "counts": {},
+                  "STATE_TABLE": "tiktok_daily_pipeline_state",
                   "state_known": set(),
                   "failed_accounts": list(scan_failures or []),
                   "register_auto_ready": register,
