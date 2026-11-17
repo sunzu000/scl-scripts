@@ -163,13 +163,17 @@ def register_auto_ready(r):
     # Never append a conflicting song link while repairing an incomplete v9 row.
     # An existing link with another song (including a manually excluded link)
     # requires review; it cannot safely be overwritten by title heuristics.
-    old_original = api_secret_get("song_media_links", "song_id", f"media_id=eq.{media_id}")
-    old_covers = api_secret_get("cover_song_media_links", "cover_song_id", f"media_id=eq.{media_id}")
+    old_original = api_secret_get("song_media_links", "song_id,match_status", f"media_id=eq.{media_id}")
+    old_covers = api_secret_get("cover_song_media_links", "cover_song_id,match_status", f"media_id=eq.{media_id}")
     found = {("ORIGINAL", str(x["song_id"])) for x in old_original}
     found |= {("COVER", str(x["cover_song_id"])) for x in old_covers}
     desired = (r["match_type"], str(r["match_id"]))
     if found and found != {desired}:
         raise RuntimeError(f"existing song links conflict with auto match for video {vid}; manual review required")
+    # Even an identical song ID must not bypass an existing human exclusion or
+    # unmatched status. AUTO_READY is appropriate only for active links.
+    if any(x.get("match_status") not in ("matched", "confirmed") for x in old_original + old_covers):
+        raise RuntimeError(f"existing song link is excluded or unverified for video {vid}; manual review required")
 
     filt = f"{idcol}=eq.{quote(str(r['match_id']))}&media_id=eq.{media_id}"
     linked = api_secret_get(table, f"{idcol},media_id", filt)
