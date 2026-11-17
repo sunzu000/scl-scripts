@@ -1,0 +1,32 @@
+name: TikTok v9 Draft Python Check
+on:
+  pull_request:
+    paths:
+      - 'TikTok_DailyPipeline_v9.py'
+      - '.github/workflows/tiktok-v9-draft-check.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Compile Python without executing the pipeline
+        run: python3 -m py_compile TikTok_DailyPipeline_v9.py
+      - name: Verify required failure reporting branches exist
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast
+          p = Path("TikTok_DailyPipeline_v9.py")
+          s = p.read_text(encoding="utf-8")
+          ast.parse(s)
+          assert 'write_errors.append(("DB_WRITE_ERROR", vid))' in s
+          assert 'write_errors.append(("STATE_WRITE_ERROR", vid))' in s
+          assert 'if write_errors or failed_accounts:' in s
+          assert 'if scanned_accounts == 0:' in s
+          assert 'sys.exit("ERROR: no active TikTok accounts available for monitoring")' in s
+          print("Static failure-reporting checks PASS")
+          PY
