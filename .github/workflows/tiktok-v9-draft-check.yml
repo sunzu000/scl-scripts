@@ -33,3 +33,85 @@ jobs:
           assert 'sys.exit("ERROR: no active TikTok accounts available for monitoring")' in s
           print("Static failure-reporting checks PASS")
           PY
+
+      - name: Simulate actual final-write control flow without network
+        run: |
+          python3 - <<'PY'
+          import ast
+          import csv
+          import io
+          import sys
+          from pathlib import Path
+
+          source = Path("TikTok_DailyPipeline_v9.py").read_text(encoding="utf-8")
+          parsed = ast.parse(source)
+          i = next(
+              n for n, node in enumerate(parsed.body)
+              if isinstance(node, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == "registered" for t in node.targets)
+          )
+          end_code = compile(
+              ast.fix_missing_locations(ast.Module(body=parsed.body[i:], type_ignores=[])),
+              "<v9_final_write_path>", "exec",
+          )
+
+          header = "video_id,decision,match_type,match_title\n"
+          class FakeOutput:
+              def __init__(self, text):
+                  self.text = text
+              def open(self, *args, **kwargs):
+                  return io.StringIO(self.text)
+
+          def simulate(rows, db_failure=False, state_failure=False, scan_failures=None):
+              flags = {"register_calls": 0, "state_calls": 0}
+              def register(row):
+                  flags["register_calls"] += 1
+                  if db_failure:
+                      raise RuntimeError("mock database write failed")
+                  return 123
+              def save_state(row):
+                  flags["state_calls"] += 1
+                  if state_failure:
+                      raise RuntimeError("mock state write failed")
+              ns = {
+                  "OUT": FakeOutput(header + rows),
+                  "csv": csv,
+                  "sys": sys,
+                  "counts": {},
+                  "state_known": set(),
+                  "failed_accounts": list(scan_failures or []),
+                  "register_auto_ready": register,
+                  "state_upsert": save_state,
+                  "print": lambda *args, **kwargs: None,
+              }
+              try:
+                  exec(end_code, ns)
+                  return False, flags
+              except SystemExit as e:
+                  return bool(e.code), flags
+
+          normal, stat = simulate("")
+          assert normal is False and stat["state_calls"] == 0
+          original = "7423254885400939784,AUTO_READY_ORIGINAL,ORIGINAL,u...\n"
+          normal, stat = simulate(original)
+          assert normal is False and stat["register_calls"] == 1 and stat["state_calls"] == 1
+          abnormal, stat = simulate(original, db_failure=True)
+          assert abnormal is True and stat["register_calls"] == 1 and stat["state_calls"] == 0
+          nonauto = "7703741502568140084,HOLD,,\n"
+          abnormal, stat = simulate(nonauto, state_failure=True)
+          assert abnormal is True and stat["state_calls"] == 1
+          abnormal, stat = simulate("", scan_failures=["some_account"])
+          assert abnormal is True
+
+          scan_guard = next(node for node in parsed.body if isinstance(node, ast.If)
+                            and ast.unparse(node.test) == "scanned_accounts == 0")
+          guard_code = compile(ast.fix_missing_locations(
+              ast.Module(body=[scan_guard], type_ignores=[])), "<all_account_scan_guard>", "exec")
+          try:
+              exec(guard_code, {"scanned_accounts": 0, "sys": sys})
+              raise AssertionError("All failed accounts should terminate")
+          except SystemExit as e:
+              assert e.code
+          exec(guard_code, {"scanned_accounts": 1, "sys": sys})
+          print("Five isolated normal/error cases and zero-account guard PASS")
+          PY
