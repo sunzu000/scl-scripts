@@ -247,15 +247,20 @@ for m in media:
         handles.setdefault(mm.group(1), m["url"])
 
 print("HANDLES:", len(handles), "KNOWN:", len(known), flush=True)
+if not handles:
+    sys.exit("ERROR: no active TikTok accounts available for monitoring")
 
 # ---- discover new IDs ----
 new = {}
+scanned_accounts = 0
+failed_accounts = []
 for hi, (handle, sample) in enumerate(sorted(handles.items()), 1):
     print(f"ACCOUNT [{hi}/{len(handles)}] @{handle}", flush=True)
     rc, so, se = run(["yt-dlp","--user-agent",UA,"--skip-download","--print","%(channel_id)s",sample], 60)
     cid = next((x.strip() for x in so.splitlines() if x.strip() and x.strip() != "NA"), "")
     if not cid:
         print("  HOLD: channel_id unavailable", flush=True)
+        failed_accounts.append(handle)
         continue
     best = []
     for _ in range(3):
@@ -263,10 +268,18 @@ for hi, (handle, sample) in enumerate(sorted(handles.items()), 1):
         ids = [x.strip() for x in so.splitlines() if re.fullmatch(r"\d{15,22}", x.strip())]
         if len(ids) > len(best):
             best = ids
+    if best:
+        scanned_accounts += 1
+    else:
+        print("  HOLD: no video IDs returned for monitored account", flush=True)
+        failed_accounts.append(handle)
     for vid in best:
         if vid not in known:
             new.setdefault(vid, handle)
 
+print("ACCOUNT_SCANS_OK:", scanned_accounts, "FAILED:", len(failed_accounts), flush=True)
+if scanned_accounts == 0:
+    sys.exit("ERROR: all monitored TikTok accounts failed video discovery")
 print("NEW:", len(new), flush=True)
 
 fields = [
@@ -440,6 +453,7 @@ if "\ufffd" in text:
 # persisted immediately.
 registered = []
 state_written = 0
+write_errors = []
 with OUT.open("r", encoding="utf-8-sig", newline="") as rf:
     for r in csv.DictReader(rf):
         vid = str(r.get("video_id") or "").strip()
@@ -452,6 +466,7 @@ with OUT.open("r", encoding="utf-8-sig", newline="") as rf:
                 registered.append((r["match_type"], r["match_title"], vid, media_id))
             except Exception as e:
                 print("DB_WRITE_ERROR:", vid, repr(e), flush=True)
+                write_errors.append(("DB_WRITE_ERROR", vid))
                 # Do not persist state; next daily run retries this candidate.
                 continue
         try:
@@ -459,6 +474,7 @@ with OUT.open("r", encoding="utf-8-sig", newline="") as rf:
             state_written += 1
         except Exception as e:
             print("STATE_WRITE_ERROR:", vid, repr(e), flush=True)
+            write_errors.append(("STATE_WRITE_ERROR", vid))
             # State failure must remain visible; media registration is idempotent.
 
 print("DONE:", OUT, flush=True)
@@ -468,3 +484,6 @@ for k in sorted(counts):
 print("DB_REGISTERED:", len(registered), flush=True)
 for typ, title, vid, media_id in registered:
     print(f"REGISTERED: {typ} | {title} | media_id={media_id} | https://www.tiktok.com/video/{vid}", flush=True)
+print("WRITE_ERRORS:", len(write_errors), flush=True)
+if write_errors:
+    sys.exit(f"ERROR: {len(write_errors)} Supabase DB/state writes failed; see DB_WRITE_ERROR and STATE_WRITE_ERROR above")
