@@ -34,6 +34,38 @@ jobs:
           print("Static failure-reporting checks PASS")
           PY
 
+      - name: Read-only live Supabase Data API smoke test
+        run: |
+          python3 - <<'PY'
+          # GET only. Never load a secret, create a media row or write State.
+          import ast
+          import json
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          from urllib.parse import quote
+          p = ast.parse(Path("TikTok_DailyPipeline_v9.py").read_text(encoding="utf-8"))
+          named = {}
+          for node in p.body:
+              if isinstance(node, ast.Assign):
+                  for t in node.targets:
+                      if isinstance(t, ast.Name) and t.id in ("KEY", "URL"):
+                          named[t.id] = ast.literal_eval(node.value)
+          assert named["KEY"].startswith("sb_publishable_")
+          assert named["URL"] == "https://anijyugrqffxlnlijtnb.supabase.co"
+          func = next(n for n in p.body if isinstance(n, ast.FunctionDef) and n.name == "api_get")
+          code = compile(ast.fix_missing_locations(ast.Module(body=[func],type_ignores=[])),
+                         "<v9_public_get>", "exec")
+          ns = {**named, "json": json, "Request": Request, "urlopen": urlopen,
+                "quote": quote}
+          exec(code, ns)
+          songs = ns["api_get"]("songs", "song_id,song_title", "song_id=eq.S0037")
+          assert len(songs) == 1 and songs[0]["song_id"] == "S0037"
+          media = ns["api_get"]("media_items", "media_id,platform_item_id",
+                                "platform=eq.tiktok&platform_item_id=eq.7704583712473746709")
+          assert len(media) == 1
+          print("Read-only Supabase public REST GET PASS (songs, media_items)")
+          PY
+
       - name: Simulate actual final-write control flow without network
         run: |
           python3 - <<'PY'
