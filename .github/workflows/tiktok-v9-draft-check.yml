@@ -149,6 +149,44 @@ jobs:
               raise AssertionError("Missing rediscovery must fail")
           except SystemExit as exc:
               assert exc.code
+          # Exercise the actual register_auto_ready() code with fake API calls.
+          registration = next(node for node in parsed.body if isinstance(node, ast.FunctionDef)
+                              and node.name == "register_auto_ready")
+          regcode = compile(ast.fix_missing_locations(
+              ast.Module(body=[registration], type_ignores=[])), "<register_auto_ready>", "exec")
+          def registration_case(original=None, cover=None, existing=True, fail_state=False):
+              events = []
+              def fake_get(table, select, filters=""):
+                  if table == "media_items":
+                      return [{"media_id": 501}] if existing else []
+                  if table == "song_media_links" and select == "song_id":
+                      return [{"song_id": x} for x in (original or [])]
+                  if table == "cover_song_media_links" and select == "cover_song_id":
+                      return [{"cover_song_id": x} for x in (cover or [])]
+                  return []
+              def fake_post(table, payload):
+                  events.append((table, payload))
+                  return [{"media_id": 501}]
+              scope = {"api_secret_get": fake_get, "api_post": fake_post,
+                       "quote": lambda x: x, "int": int, "float": float, "str": str}
+              exec(regcode, scope)
+              row = {"video_id": "7701", "match_type": "ORIGINAL", "match_id": "S0001",
+                     "title": "test", "url": "https://www.tiktok.com/@test/video/7701"}
+              try:
+                  result = scope["register_auto_ready"](row)
+                  return result, events
+              except RuntimeError:
+                  return None, events
+
+          result, events = registration_case(original=["S0001"])
+          assert result == 501 and len(events) == 0
+          result, events = registration_case(original=["S0002"])
+          assert result is None and len(events) == 0
+          result, events = registration_case(cover=["C0001"])
+          assert result is None and len(events) == 0
+          result, events = registration_case()
+          assert result == 501 and [e[0] for e in events] == ["song_media_links"]
+          print("Registered media reuse / link collision fail-closed checks PASS")
           print("Recovery selection and missing-rediscovery failure checks PASS")
           print("Five isolated normal/error cases and zero-account guard PASS")
           PY
