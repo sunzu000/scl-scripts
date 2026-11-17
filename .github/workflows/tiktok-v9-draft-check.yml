@@ -63,7 +63,12 @@ jobs:
           media = ns["api_get"]("media_items", "media_id,platform_item_id",
                                 "platform=eq.tiktok&platform_item_id=eq.7704583712473746709")
           assert len(media) == 1
-          print("Read-only Supabase public REST GET PASS (songs, media_items)")
+          # TikTok exceeds 1000 rows. Exercise limit=1000 + offset paging
+          # exactly as the PC94 script uses it, without writing anything.
+          all_tiktok = ns["api_get"]("media_items", "media_id", "platform=eq.tiktok")
+          ids = [r["media_id"] for r in all_tiktok]
+          assert len(ids) > 1000 and len(ids) == len(set(ids))
+          print("Read-only Supabase REST GET PASS; pagination rows:", len(ids))
           PY
 
       - name: Simulate actual final-write control flow without network
