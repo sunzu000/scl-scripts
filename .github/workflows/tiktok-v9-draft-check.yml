@@ -71,6 +71,154 @@ jobs:
           print("Read-only Supabase REST GET PASS; pagination rows:", len(ids))
           PY
 
+      - name: Exercise actual v9 Supabase HTTP contracts offline
+        run: |
+          python3 - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+          from urllib.request import Request
+          from urllib.parse import quote, urlsplit, parse_qs
+          from urllib.error import HTTPError
+
+          source = Path("TikTok_DailyPipeline_v9.py").read_text(encoding="utf-8")
+          parsed = ast.parse(source)
+          function_names = ("state_payload", "state_upsert", "api_post",
+                            "api_secret_get", "register_auto_ready",
+                            "pending_auto_state_retries")
+          funcs = [n for n in parsed.body if isinstance(n, ast.FunctionDef)
+                   and n.name in function_names]
+          assert {n.name for n in funcs} == set(function_names)
+          script = compile(ast.fix_missing_locations(ast.Module(
+              body=funcs, type_ignores=[])), "<isolated_v9_http>", "exec")
+
+          class Result:
+              def __init__(self, data):
+                  self.data = json.dumps(data).encode()
+              def __enter__(self):
+                  return self
+              def __exit__(self, *args):
+                  return False
+              def read(self):
+                  return self.data
+
+          class FakeSupabase:
+              def __init__(self):
+                  self.tables = {k: [] for k in
+                      ("media_items", "song_media_links", "cover_song_media_links",
+                       "tiktok_daily_pipeline_state")}
+                  self.fail_table = None
+                  self.fail_after_commit = False
+                  self.requests = []
+              def open(self, req, timeout=60):
+                  url = urlsplit(req.full_url)
+                  table = url.path.rsplit("/", 1)[-1]
+                  method = req.get_method()
+                  self.requests.append((method, table))
+                  assert table in self.tables, table
+                  assert req.get_header("Apikey") == "sb_secret_test_only"
+                  q = parse_qs(url.query)
+                  if method == "GET":
+                      rows = self.tables[table]
+                      for key, value in q.items():
+                          if key in ("platform", "platform_item_id", "media_id",
+                                     "song_id", "cover_song_id", "video_id"):
+                              val = value[0].replace("eq.", "", 1)
+                              rows = [r for r in rows if str(r.get(key)) == val]
+                      return Result(rows)
+                  assert method == "POST" and req.data is not None
+                  payload = json.loads(req.data.decode("utf-8"))
+                  should_fail = self.fail_table == table
+                  self.fail_table = None
+                  if should_fail and not self.fail_after_commit:
+                      raise HTTPError(req.full_url, 503, "mock precommit", {}, None)
+                  if table == "media_items":
+                      assert not any(r["platform_item_id"] == payload["platform_item_id"]
+                                     for r in self.tables[table])
+                      payload["media_id"] = 777
+                      self.tables[table].append(payload)
+                  elif table == "tiktok_daily_pipeline_state":
+                      assert q.get("on_conflict") == ["video_id"]
+                      self.tables[table] = [r for r in self.tables[table]
+                                            if r["video_id"] != payload["video_id"]]
+                      self.tables[table].append(payload)
+                  else:
+                      assert not any(r.get("media_id") == payload["media_id"]
+                                     and r.get("song_id", r.get("cover_song_id"))
+                                     == payload.get("song_id", payload.get("cover_song_id"))
+                                     for r in self.tables[table])
+                      self.tables[table].append(payload)
+                  if should_fail:
+                      raise HTTPError(req.full_url, 503, "mock reply lost", {}, None)
+                  return Result([payload] if table == "media_items" else [])
+
+          row = {"video_id": "7770001112223334444", "handle": "moa_pi",
+                 "match_type": "ORIGINAL", "match_id": "S0037",
+                 "match_title": "パラグラフ", "decision": "AUTO_READY_ORIGINAL",
+                 "duration": "60",
+                 "url": "https://www.tiktok.com/@moa_pi/video/7770001112223334444"}
+          fake = FakeSupabase()
+          ns = {"json": json, "Request": Request, "quote": quote,
+                "URL": "https://example.test", "STATE_TABLE": "tiktok_daily_pipeline_state",
+                "SECRET_KEY": "sb_secret_test_only", "urlopen": fake.open}
+          exec(script, ns)
+          register, save = ns["register_auto_ready"], ns["state_upsert"]
+          detect = ns["pending_auto_state_retries"]
+
+          # Fail after a media insert but before any song link exists.
+          fake.fail_table = "song_media_links"
+          try:
+              register(row)
+              raise AssertionError("link POST must fail")
+          except HTTPError as e:
+              assert e.code == 503
+          assert len(fake.tables["media_items"]) == 1
+          assert not fake.tables["song_media_links"]
+          assert not fake.tables["tiktok_daily_pipeline_state"]
+          assert detect(fake.tables["media_items"], set()) == {row["video_id"]}
+
+          # Retry reuses the media row and adds exactly one link.
+          assert register(row) == 777
+          assert len(fake.tables["media_items"]) == 1
+          assert len(fake.tables["song_media_links"]) == 1
+          fake.fail_table = "tiktok_daily_pipeline_state"
+          try:
+              save(row)
+              raise AssertionError("state POST must fail")
+          except HTTPError as e:
+              assert e.code == 503
+          assert len(fake.tables["tiktok_daily_pipeline_state"]) == 0
+          assert detect(fake.tables["media_items"], set()) == {row["video_id"]}
+
+          # A lost acknowledgement after State was committed is idempotent.
+          fake.fail_table = "tiktok_daily_pipeline_state"
+          fake.fail_after_commit = True
+          try:
+              save(row)
+              raise AssertionError("lost State reply must surface as error")
+          except HTTPError as e:
+              assert e.code == 503
+          assert len(fake.tables["tiktok_daily_pipeline_state"]) == 1
+          assert register(row) == 777
+          fake.fail_after_commit = False
+          save(row)
+          assert len(fake.tables["media_items"]) == 1
+          assert len(fake.tables["song_media_links"]) == 1
+          assert len(fake.tables["tiktok_daily_pipeline_state"]) == 1
+          assert detect(fake.tables["media_items"], {row["video_id"]}) == set()
+
+          # An excluded existing link must never be silently reactivated.
+          fake.tables["song_media_links"][0]["match_status"] = "exclude"
+          before = len(fake.requests)
+          try:
+              register(row)
+              raise AssertionError("excluded link must fail closed")
+          except RuntimeError as e:
+              assert "excluded or unverified" in str(e)
+          assert all(m != "POST" for m,t in fake.requests[before:])
+          print("HTTP contract / partial registration / retry / lost reply / exclusion PASS")
+          print("All HTTP was intercepted by FakeSupabase; zero real writes")
+          PY
       - name: Simulate actual final-write control flow without network
         run: |
           python3 - <<'PY'
