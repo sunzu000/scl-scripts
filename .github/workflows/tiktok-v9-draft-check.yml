@@ -131,8 +131,14 @@ jobs:
               {"media_id": 104, "platform_item_id": "704", "notes": "auto_tiktok_daily_v9"},
           ]
           originals = [{"media_id": 103, "match_method": "auto_tiktok_account_title"}]
-          assert detect(media, originals, [], {"704"}) == {"701", "703"}
-          assert detect(media, originals, [], {"701", "703", "704"}) == set()
+          # A legacy link must not be reprocessed solely for sharing the
+          # historical auto method name with v9.
+          assert originals[0]["match_method"] == "auto_tiktok_account_title"
+          assert detect(media, {"704"}) == {"701"}
+          assert detect(media, {"701", "704"}) == set()
+          media.append({"media_id": 105, "platform_item_id": "705",
+                        "notes": "auto_tiktok_daily_strict_20261101"})
+          assert detect(media, {"704"}) == {"701"}
 
           # A failed persisted auto registration that does not reappear in account
           # discovery must make the job fail, never silently report success.
