@@ -192,15 +192,15 @@ jobs:
                               and node.name == "register_auto_ready")
           regcode = compile(ast.fix_missing_locations(
               ast.Module(body=[registration], type_ignores=[])), "<register_auto_ready>", "exec")
-          def registration_case(original=None, cover=None, existing=True, fail_state=False):
+          def registration_case(original=None, cover=None, existing=True, link_status="matched"):
               events = []
               def fake_get(table, select, filters=""):
                   if table == "media_items":
                       return [{"media_id": 501}] if existing else []
-                  if table == "song_media_links" and select == "song_id":
-                      return [{"song_id": x} for x in (original or [])]
-                  if table == "cover_song_media_links" and select == "cover_song_id":
-                      return [{"cover_song_id": x} for x in (cover or [])]
+                  if table == "song_media_links" and select == "song_id,match_status":
+                      return [{"song_id": x, "match_status": link_status} for x in (original or [])]
+                  if table == "cover_song_media_links" and select == "cover_song_id,match_status":
+                      return [{"cover_song_id": x, "match_status": link_status} for x in (cover or [])]
                   if table == "song_media_links" and select == "song_id,media_id":
                       return [{"song_id": x, "media_id": 501} for x in (original or []) if x == "S0001"]
                   return []
@@ -224,6 +224,12 @@ jobs:
           assert result is None and len(events) == 0
           result, events = registration_case(cover=["C0001"])
           assert result is None and len(events) == 0
+          result, events = registration_case(original=["S0001"], link_status="exclude")
+          assert result is None and len(events) == 0
+          result, events = registration_case(original=["S0001"], link_status="unmatched")
+          assert result is None and len(events) == 0
+          result, events = registration_case(original=["S0001"], link_status="confirmed")
+          assert result == 501 and len(events) == 0
           result, events = registration_case()
           assert result == 501 and [e[0] for e in events] == ["song_media_links"]
           print("Registered media reuse / link collision fail-closed checks PASS")
