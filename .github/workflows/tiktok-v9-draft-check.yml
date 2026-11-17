@@ -129,7 +129,8 @@ jobs:
                   assert method == "POST" and req.data is not None
                   payload = json.loads(req.data.decode("utf-8"))
                   should_fail = self.fail_table == table
-                  self.fail_table = None
+                  if should_fail:
+                      self.fail_table = None
                   if should_fail and not self.fail_after_commit:
                       raise HTTPError(req.full_url, 503, "mock precommit", {}, None)
                   if table == "media_items":
