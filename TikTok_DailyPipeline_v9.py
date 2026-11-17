@@ -160,6 +160,21 @@ def register_auto_ready(r):
     else:
         table, idcol = "cover_song_media_links", "cover_song_id"
 
+    # Never append a conflicting song link while repairing an incomplete v9 row.
+    # An existing link with another song (including a manually excluded link)
+    # requires review; it cannot safely be overwritten by title heuristics.
+    old_original = api_secret_get("song_media_links", "song_id,match_status", f"media_id=eq.{media_id}")
+    old_covers = api_secret_get("cover_song_media_links", "cover_song_id,match_status", f"media_id=eq.{media_id}")
+    found = {("ORIGINAL", str(x["song_id"])) for x in old_original}
+    found |= {("COVER", str(x["cover_song_id"])) for x in old_covers}
+    desired = (r["match_type"], str(r["match_id"]))
+    if found and found != {desired}:
+        raise RuntimeError(f"existing song links conflict with auto match for video {vid}; manual review required")
+    # Even an identical song ID must not bypass an existing human exclusion or
+    # unmatched status. AUTO_READY is appropriate only for active links.
+    if any(x.get("match_status") not in ("matched", "confirmed") for x in old_original + old_covers):
+        raise RuntimeError(f"existing song link is excluded or unverified for video {vid}; manual review required")
+
     filt = f"{idcol}=eq.{quote(str(r['match_id']))}&media_id=eq.{media_id}"
     linked = api_secret_get(table, f"{idcol},media_id", filt)
     if not linked:
@@ -208,10 +223,26 @@ def title_hits(text, masters):
             seen.add(x); out.append(x)
     return out
 
+def pending_auto_state_retries(media_rows, state_ids):
+    """Retry only v9-owned media missing shared State.
+
+    Legacy imports also used match_method='auto_tiktok_account_title'.
+    That marker is not unique to v9 and MUST NOT trigger reprocessing.
+    A v9-created media row carries its own exact notes marker.
+    """
+    return {
+        str(m["platform_item_id"])
+        for m in media_rows
+        if m.get("platform_item_id")
+        and str(m["platform_item_id"]) not in state_ids
+        and (m.get("notes") or "").strip() == "auto_tiktok_daily_v9"
+    }
+
+
 # ---- DB snapshot ----
-media = api_get("media_items", "media_id,platform_item_id,url,title,description,channel_name", "platform=eq.tiktok")
-orig_links = api_get("song_media_links", "media_id,song_id,match_status")
-cover_links = api_get("cover_song_media_links", "media_id,cover_song_id,match_status")
+media = api_get("media_items", "media_id,platform_item_id,url,title,description,channel_name,notes", "platform=eq.tiktok")
+orig_links = api_get("song_media_links", "media_id,song_id,match_status,match_method")
+cover_links = api_get("cover_song_media_links", "media_id,cover_song_id,match_status,match_method")
 songs = api_get("songs", "song_id,song_title")
 covers = api_get("cover_songs", "cover_song_id,song_title")
 
@@ -231,8 +262,13 @@ state_known = {
     for r in shared_state
     if str(r.get("video_id") or "").strip() and str(r.get("decision") or "").strip()
 }
+# A media insert or song-link insert may have succeeded before a later
+# link/State call failed. Such v9-owned rows must NOT be hidden by media.known.
+retryable_auto = pending_auto_state_retries(media, state_known)
+known.difference_update(retryable_auto)
 known |= state_known
 print("SHARED_STATE:", len(state_known), flush=True)
+print("AUTO_REGISTRATION_STATE_RECOVERY_PENDING:", len(retryable_auto), flush=True)
 
 song_master = [(x["song_id"], x.get("song_title") or "") for x in songs]
 cover_master = [(x["cover_song_id"], x.get("song_title") or "") for x in covers]
@@ -247,15 +283,20 @@ for m in media:
         handles.setdefault(mm.group(1), m["url"])
 
 print("HANDLES:", len(handles), "KNOWN:", len(known), flush=True)
+if not handles:
+    sys.exit("ERROR: no active TikTok accounts available for monitoring")
 
 # ---- discover new IDs ----
 new = {}
+scanned_accounts = 0
+failed_accounts = []
 for hi, (handle, sample) in enumerate(sorted(handles.items()), 1):
     print(f"ACCOUNT [{hi}/{len(handles)}] @{handle}", flush=True)
     rc, so, se = run(["yt-dlp","--user-agent",UA,"--skip-download","--print","%(channel_id)s",sample], 60)
     cid = next((x.strip() for x in so.splitlines() if x.strip() and x.strip() != "NA"), "")
     if not cid:
         print("  HOLD: channel_id unavailable", flush=True)
+        failed_accounts.append(handle)
         continue
     best = []
     for _ in range(3):
@@ -263,10 +304,18 @@ for hi, (handle, sample) in enumerate(sorted(handles.items()), 1):
         ids = [x.strip() for x in so.splitlines() if re.fullmatch(r"\d{15,22}", x.strip())]
         if len(ids) > len(best):
             best = ids
+    if best:
+        scanned_accounts += 1
+    else:
+        print("  HOLD: no video IDs returned for monitored account", flush=True)
+        failed_accounts.append(handle)
     for vid in best:
         if vid not in known:
             new.setdefault(vid, handle)
 
+print("ACCOUNT_SCANS_OK:", scanned_accounts, "FAILED:", len(failed_accounts), flush=True)
+if scanned_accounts == 0:
+    sys.exit("ERROR: all monitored TikTok accounts failed video discovery")
 print("NEW:", len(new), flush=True)
 
 fields = [
@@ -440,11 +489,19 @@ if "\ufffd" in text:
 # persisted immediately.
 registered = []
 state_written = 0
+write_errors = []
+recovery_attention = []
 with OUT.open("r", encoding="utf-8-sig", newline="") as rf:
     for r in csv.DictReader(rf):
         vid = str(r.get("video_id") or "").strip()
         decision = str(r.get("decision") or "").strip()
         if not vid or not decision:
+            continue
+        if vid in retryable_auto and decision not in ("AUTO_READY_ORIGINAL", "AUTO_READY_COVER"):
+            # Metadata changed or the video is no longer classifiable; do not
+            # replace a partially registered song with a contradictory HOLD.
+            print("RECOVERY_REVIEW_REQUIRED:", vid, decision, flush=True)
+            recovery_attention.append(vid)
             continue
         if decision in ("AUTO_READY_ORIGINAL", "AUTO_READY_COVER"):
             try:
@@ -452,6 +509,7 @@ with OUT.open("r", encoding="utf-8-sig", newline="") as rf:
                 registered.append((r["match_type"], r["match_title"], vid, media_id))
             except Exception as e:
                 print("DB_WRITE_ERROR:", vid, repr(e), flush=True)
+                write_errors.append(("DB_WRITE_ERROR", vid))
                 # Do not persist state; next daily run retries this candidate.
                 continue
         try:
@@ -459,6 +517,7 @@ with OUT.open("r", encoding="utf-8-sig", newline="") as rf:
             state_written += 1
         except Exception as e:
             print("STATE_WRITE_ERROR:", vid, repr(e), flush=True)
+            write_errors.append(("STATE_WRITE_ERROR", vid))
             # State failure must remain visible; media registration is idempotent.
 
 print("DONE:", OUT, flush=True)
@@ -468,3 +527,18 @@ for k in sorted(counts):
 print("DB_REGISTERED:", len(registered), flush=True)
 for typ, title, vid, media_id in registered:
     print(f"REGISTERED: {typ} | {title} | media_id={media_id} | https://www.tiktok.com/video/{vid}", flush=True)
+print("WRITE_ERRORS:", len(write_errors), flush=True)
+unseen_retries = sorted(retryable_auto.difference(new))
+if recovery_attention:
+    print("RECOVERY_REVIEW_REQUIRED_IDS:", ",".join(recovery_attention), flush=True)
+if unseen_retries:
+    print("RECOVERY_PENDING_NOT_DISCOVERED:", ",".join(unseen_retries), flush=True)
+if failed_accounts:
+    print("ACCOUNT_SCAN_ERRORS:", ",".join(failed_accounts), flush=True)
+if write_errors or failed_accounts or recovery_attention or unseen_retries:
+    sys.exit(
+        f"ERROR: {len(write_errors)} Supabase DB/state write failures; "
+        f"{len(failed_accounts)} account scan failures; "
+        f"{len(recovery_attention)} incomplete auto registrations need review; "
+        f"{len(unseen_retries)} incomplete auto registrations not rediscovered"
+    )
