@@ -556,21 +556,9 @@ def render_full_song_clips_v7(folder, songs, date):
 
 
 def cleanup_source_recordings(inputs, merged):
-    """YYYYMMDD_PC.mp4 完成後、同一フォルダ内の元録画partだけ削除する。"""
-    merged = Path(merged).resolve()
-    folder = merged.parent
-    removed = []
-    for source in inputs:
-        p = Path(source).resolve()
-        if p == merged or p.parent != folder:
-            continue
-        name = p.name.lower()
-        if "_part" not in name or not (name.endswith(".mp4") or name.endswith(".mp4.part")):
-            continue
-        if p.is_file():
-            p.unlink()
-            removed.append(str(p))
-    return removed
+    """Preserve all source recording parts for recovery; never delete them."""
+    logging.info('Source recording parts retained: %d', len(inputs))
+    return []
 
 
 def supabase_sync_live(folder, songs, date, video=None, digest=None):
